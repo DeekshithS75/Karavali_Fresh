@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import test from 'node:test';
 
-process.env.OTP_DELIVERY_URL = '';
-process.env.OTP_DELIVERY_API_KEY = '';
+process.env.MSG91_AUTH_KEY = '';
+process.env.MSG91_REGISTRATION_TEMPLATE_ID = '';
+process.env.MSG91_LOGIN_TEMPLATE_ID = '';
 process.env.OTP_HMAC_SECRET = '';
 
 const { default: app } = await import('../src/app.js');

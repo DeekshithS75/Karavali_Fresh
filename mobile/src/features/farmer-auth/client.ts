@@ -2,11 +2,10 @@ import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 
 const SESSION_KEY = 'karavali-fresh.farmer.session.v1';
-const REGISTERED_KEY = 'karavali-fresh.farmer.registered.v1';
 const API_BASE = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 
 type SessionTokens = { accessToken: string; refreshToken?: string };
-type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'testModeDisabled' | 'network' | 'rejected' | 'exists' | 'documentMismatch' | 'documentUnreadable' | 'otpNotConfigured' | 'ocrUnavailable' | 'farmerNotFound';
+type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'testModeDisabled' | 'network' | 'rejected' | 'exists' | 'documentMismatch' | 'documentUnreadable' | 'otpNotConfigured' | 'otpProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound';
 export class FarmerAuthError extends Error {
   constructor(readonly code: ApiErrorCode) { super(code); }
 }
@@ -33,11 +32,13 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new FarmerAuthError('network');
   }
   if (!response.ok) {
-    if (response.status === 422 || response.status === 503 || response.status === 404) {
+    if ([422, 429, 503, 404].includes(response.status)) {
       const body = await response.json().catch(() => ({})) as { error?: string };
       if (body.error === 'document_mismatch') throw new FarmerAuthError('documentMismatch');
       if (body.error === 'document_unreadable') throw new FarmerAuthError('documentUnreadable');
       if (body.error === 'otp_provider_not_configured') throw new FarmerAuthError('otpNotConfigured');
+      if (body.error === 'otp_provider_unavailable') throw new FarmerAuthError('otpProviderFailure');
+      if (body.error === 'rate_limit_exceeded' || body.error === 'otp_resend_too_soon') throw new FarmerAuthError('rateLimited');
       if (body.error === 'ocr_engine_not_configured') throw new FarmerAuthError('ocrUnavailable');
       if (body.error === 'farmer_not_found') throw new FarmerAuthError('farmerNotFound');
     }
@@ -71,18 +72,6 @@ async function saveTokens(tokens: SessionTokens) {
 
 async function clearTokens() {
   if (Platform.OS !== 'web') await SecureStore.deleteItemAsync(SESSION_KEY);
-}
-
-export async function hasRegisteredFarmerMarker() {
-  return Platform.OS !== 'web' && (await SecureStore.getItemAsync(REGISTERED_KEY)) === '1';
-}
-
-export async function markFarmerRegistered() {
-  if (Platform.OS !== 'web') await SecureStore.setItemAsync(REGISTERED_KEY, '1');
-}
-
-export async function clearFarmerRegisteredMarker() {
-  if (Platform.OS !== 'web') await SecureStore.deleteItemAsync(REGISTERED_KEY);
 }
 
 export type FarmerCapabilities = {
@@ -137,6 +126,12 @@ export async function getFarmerCapabilities() {
   return request<FarmerCapabilities>('/api/farmer/auth/capabilities');
 }
 
+export async function lookupFarmerAccount(phone: string) {
+  return request<{ accountStatus: 'registered' | 'pending' | 'new'; verificationId?: string }>('/api/farmer/auth/lookup', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone: `+91${phone.replace(/\D/g, '').slice(-10)}` }),
+  });
+}
+
 export async function hasValidFarmerSession(): Promise<boolean> {
   const tokens = await readTokens();
   if (!tokens) return false;
@@ -160,10 +155,11 @@ export async function submitFarmerRegistration(data: FarmerRegistration, imageUr
   body.append('fullName', data.fullName);
   body.append('age', data.age);
   body.append('gender', data.gender);
-  body.append('phone', data.phone);
+  body.append('phone', `+91${data.phone.replace(/\D/g, '').slice(-10)}`);
   body.append('aadhaar', data.aadhaar);
   body.append('address', data.address);
   body.append('consent', 'true');
+  body.append('smsConsent', 'true');
   body.append('privacyNoticeVersion', privacyNoticeVersion);
   body.append('document', { uri: imageUri, name: 'identity-document', type: imageType } as never);
   const result = await request<{
@@ -195,7 +191,7 @@ export async function requestFarmerRegistrationOtp(verificationId: string) {
 
 export async function requestFarmerOtp(phone: string) {
   return request<{ challengeId: string }>('/api/farmer/auth/otp/request', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone: `+91${phone.replace(/\D/g, '').slice(-10)}` }),
   });
 }
 

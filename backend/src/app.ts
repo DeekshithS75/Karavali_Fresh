@@ -5,11 +5,11 @@ import mongoose, { Types } from 'mongoose';
 import multer from 'multer';
 import { z } from 'zod';
 import { areSessionSecretsConfigured, config, isOtpConfigured, isRegistrationEncryptionConfigured } from './config.js';
-import { decryptSecretValue, encryptSecretValue, hashAadhaar, hmac } from './crypto.js';
+import { decryptSecretValue, encryptSecretValue, hashAadhaar, hashOtpPhone, hmac } from './crypto.js';
 import { FarmerModel, OtpChallengeModel, PendingRegistrationModel } from './models/index.js';
 import { compareAadhaarDocument, isOcrConfigured, OCR_ENGINE_NAME, testAadhaarDocument, type OcrTestExpected, type RegistrationDetails } from './providers/ocr.js';
 import { ProviderNotConfiguredError } from './providers/errors.js';
-import { ApiError, createSession, enforceRateLimit, findAuthenticatedFarmer, issueOtp, validateOtpChallenge } from './services/security.js';
+import { ApiError, assertRegistrationAvailable, createSession, enforceRateLimit, findAuthenticatedFarmer, issueOtp, validateOtpChallenge } from './services/security.js';
 
 const app = express();
 const upload = multer({
@@ -24,7 +24,7 @@ app.use(helmet());
 app.use(cors({ origin: config.MOBILE_ORIGIN === '*' ? true : config.MOBILE_ORIGIN.split(',').map((value) => value.trim()) }));
 app.use(express.json({ limit: '16kb' }));
 
-const phoneSchema = z.string().transform((value) => value.replace(/\D/g, '')).refine((value) => /^\d{10}$/.test(value), 'invalid_phone');
+const phoneSchema = z.string().trim().regex(/^\+91[6-9]\d{9}$/, 'invalid_phone');
 const phoneBody = z.object({ phone: phoneSchema });
 const registrationSchema = z.object({
   fullName: z.string().trim().min(2).max(120),
@@ -34,6 +34,7 @@ const registrationSchema = z.object({
   aadhaar: z.string().transform((value) => value.replace(/\D/g, '')).refine((value) => /^\d{12}$/.test(value), 'invalid_aadhaar'),
   address: z.string().trim().min(5).max(500),
   consent: z.literal('true'),
+  smsConsent: z.literal('true'),
   privacyNoticeVersion: z.string().min(1).max(80),
 });
 const ocrTestSchema = z.object({
@@ -89,10 +90,12 @@ app.post('/api/farmer/auth/lookup', async (request, response) => {
     const { phone } = phoneBody.parse(request.body);
     await enforceRateLimit(`lookup:${hmac(phone)}`, 5, 60 * 60_000);
     await enforceRateLimit(`lookup-ip:${hmac(request.ip ?? 'unknown')}`, 30, 60 * 60_000);
-    const phoneHash = hmac(phone);
-    const registered = Boolean(await FarmerModel.exists({ phone, accountStatus: 'active' }));
-    const pending = !registered && Boolean(await PendingRegistrationModel.exists({ phoneHash, status: 'document_verified', expiresAt: { $gt: new Date() } }));
-    return response.json({ accountStatus: registered ? 'registered' : pending ? 'pending' : 'new' });
+    const phoneHash = hashOtpPhone(phone);
+    const registered = Boolean(await FarmerModel.exists({ phone: { $in: [phone, phone.slice(3)] }, accountStatus: 'active' }));
+    const pending = !registered
+      ? await PendingRegistrationModel.findOne({ phoneHash, status: 'document_verified', expiresAt: { $gt: new Date() } }).select('_id').lean().exec() as { _id: Types.ObjectId } | null
+      : null;
+    return response.json({ accountStatus: registered ? 'registered' : pending ? 'pending' : 'new', ...(pending ? { verificationId: String(pending._id) } : {}) });
   } catch (error) { return sendError(response, error); }
 });
 
@@ -106,7 +109,7 @@ app.post('/api/farmer/registrations', upload.single('document'), async (request,
       const result = await testAadhaarDocument(request.file.buffer, request.file.mimetype, expected);
       return response.status(result.status === 'unreadable' ? 422 : 200).json(result);
     }
-    const data = registrationSchema.parse(request.body) as RegistrationDetails & { consent: 'true'; privacyNoticeVersion: string };
+    const data = registrationSchema.parse(request.body) as RegistrationDetails & { consent: 'true'; smsConsent: 'true'; privacyNoticeVersion: string };
     if (data.privacyNoticeVersion !== config.PRIVACY_NOTICE_VERSION) throw new ApiError(400, 'privacy_notice_version_mismatch');
     if (!request.file || !request.file.buffer.length) throw new ApiError(400, 'document_required');
     if (!isOcrConfigured()) throw new ProviderNotConfiguredError('ocr');
@@ -114,14 +117,11 @@ app.post('/api/farmer/registrations', upload.single('document'), async (request,
       throw new ApiError(503, 'registration_encryption_not_configured');
     }
     const aadhaarHash = hashAadhaar(data.aadhaar);
-    const phoneHash = hmac(data.phone);
+    const phoneHash = hashOtpPhone(data.phone);
     await enforceRateLimit(`registration-ip:${hmac(request.ip ?? 'unknown')}`, 10, 24 * 60 * 60_000);
     await enforceRateLimit(`registration:${phoneHash}`, 3, 24 * 60 * 60_000);
     await PendingRegistrationModel.deleteMany({ expiresAt: { $lte: new Date() }, $or: [{ phoneHash }, { aadhaarHash }] });
-    if (await FarmerModel.exists({ $or: [{ phone: data.phone }, { aadhaarHash }] }) ||
-        await PendingRegistrationModel.exists({ $or: [{ phoneHash }, { aadhaarHash }], expiresAt: { $gt: new Date() } })) {
-      throw new ApiError(409, 'farmer_already_registered');
-    }
+    await assertRegistrationAvailable(data.phone, phoneHash, aadhaarHash);
 
     const comparison = await compareAadhaarDocument(request.file.buffer, request.file.mimetype, data);
     if (comparison.status === 'unreadable') return response.status(422).json({ error: 'document_unreadable', issues: comparison.issues });
@@ -139,6 +139,7 @@ app.post('/api/farmer/registrations', upload.single('document'), async (request,
       status: 'document_verified',
       privacyNoticeVersion: data.privacyNoticeVersion,
       consentedAt: now,
+      smsConsentedAt: now,
       expiresAt: new Date(now.getTime() + config.REGISTRATION_TTL_HOURS * 60 * 60_000),
     });
     return response.status(201).json({ status: 'pending', documentComparison: 'passed', verificationId: registration.id });
@@ -156,13 +157,13 @@ app.get('/api/farmer/registrations/:id/verification', async (request, response) 
 
 app.post('/api/farmer/registrations/:id/otp', async (request, response) => {
   try {
-    if (!areSessionSecretsConfigured()) throw new ApiError(503, 'session_signing_not_configured');
-    if (!isOtpConfigured()) throw new ProviderNotConfiguredError('otp');
     if (!Types.ObjectId.isValid(request.params.id)) throw new ApiError(404, 'verification_not_found');
     const registration = await PendingRegistrationModel.findById(request.params.id);
     if (!registration || registration.status !== 'document_verified' || registration.expiresAt <= new Date() || registration.documentComparisonStatus !== 'passed') {
       throw new ApiError(409, 'document_comparison_required');
     }
+    if (!areSessionSecretsConfigured()) throw new ApiError(503, 'session_signing_not_configured');
+    if (!isOtpConfigured()) throw new ProviderNotConfiguredError('otp');
     await enforceRateLimit(`registration-otp-ip:${hmac(request.ip ?? 'unknown')}`, 10, 60 * 60_000);
     const data = JSON.parse(decryptSecretValue(registration.payloadCiphertext)) as PendingFarmerDetails;
     const challenge = await issueOtp(data.phone, 'farmer_registration', { registrationId: registration._id });
@@ -176,7 +177,7 @@ app.post('/api/farmer/auth/otp/request', async (request, response) => {
     if (!areSessionSecretsConfigured()) throw new ApiError(503, 'session_signing_not_configured');
     const { phone } = phoneBody.parse(request.body);
     await enforceRateLimit(`otp-ip:${hmac(request.ip ?? 'unknown')}`, 20, 15 * 60_000);
-    const farmer = await FarmerModel.findOne({ phone, accountStatus: 'active', phoneVerificationStatus: 'verified', documentComparisonStatus: 'passed' });
+    const farmer = await FarmerModel.findOne({ phone: { $in: [phone, phone.slice(3)] }, accountStatus: 'active', phoneVerificationStatus: 'verified', documentComparisonStatus: 'passed' });
     if (!farmer) throw new ApiError(404, 'farmer_not_found');
     const challenge = await issueOtp(phone, 'farmer_login', { farmerId: farmer._id });
     return response.status(202).json({ challengeId: challenge.id });
@@ -210,6 +211,7 @@ app.post('/api/farmer/auth/otp/verify', async (request, response) => {
           accountStatus: 'active', documentComparisonStatus: 'passed', phoneVerificationStatus: 'verified',
           phoneVerifiedAt: new Date(), identityVerificationStatus: 'not_performed',
           privacyNoticeVersion: registration.privacyNoticeVersion, consentedAt: registration.consentedAt,
+          smsConsentedAt: registration.smsConsentedAt,
         }], { session: transaction });
         registration.status = 'completed';
         await registration.save({ session: transaction });

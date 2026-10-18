@@ -34,5 +34,5 @@ export function decryptSecretValue(value: string): string {
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
 }
 
-export const hashOtp = (code: string) => hmac(code, config.OTP_HMAC_SECRET);
+export const hashOtpPhone = (phone: string) => hmac(phone, config.OTP_HMAC_SECRET);
 export const hashAadhaar = (number: string) => hmac(number, config.AADHAAR_HASH_SECRET);

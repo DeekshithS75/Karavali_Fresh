@@ -14,6 +14,7 @@ const farmerSchema = new Schema({
   identityVerificationStatus: { type: String, enum: ['not_performed'], required: true, default: 'not_performed' },
   privacyNoticeVersion: { type: String, required: true },
   consentedAt: { type: Date, required: true },
+  smsConsentedAt: { type: Date, required: true },
 }, { timestamps: true, strict: 'throw' });
 
 const pendingRegistrationSchema = new Schema({
@@ -24,12 +25,13 @@ const pendingRegistrationSchema = new Schema({
   status: { type: String, enum: ['document_verified', 'completed', 'expired'], required: true, default: 'document_verified' },
   privacyNoticeVersion: { type: String, required: true },
   consentedAt: { type: Date, required: true },
+  smsConsentedAt: { type: Date, required: true },
   expiresAt: { type: Date, required: true, index: { expires: 0 } },
 }, { timestamps: true, strict: 'throw' });
 
 const otpChallengeSchema = new Schema({
   phoneHash: { type: String, required: true, index: true },
-  codeHash: { type: String, required: true },
+  providerReference: { type: String, maxlength: 120 },
   purpose: { type: String, enum: ['farmer_login', 'farmer_registration'], required: true },
   farmerId: { type: Schema.Types.ObjectId, ref: 'Farmer' },
   registrationId: { type: Schema.Types.ObjectId, ref: 'PendingFarmerRegistration' },

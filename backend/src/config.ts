@@ -10,8 +10,9 @@ const schema = z.object({
   OTP_HMAC_SECRET: z.string().optional(),
   AADHAAR_HASH_SECRET: z.string().optional(),
   AADHAAR_ENCRYPTION_KEY_BASE64: z.string().optional(),
-  OTP_DELIVERY_URL: z.string().optional(),
-  OTP_DELIVERY_API_KEY: z.string().optional(),
+  MSG91_AUTH_KEY: z.string().optional(),
+  MSG91_REGISTRATION_TEMPLATE_ID: z.string().optional(),
+  MSG91_LOGIN_TEMPLATE_ID: z.string().optional(),
   OCR_TEST_MODE_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   PRIVACY_NOTICE_VERSION: z.string().default('farmer-registration-v1'),
   PRIVACY_NOTICE_EN: z.string().default('Your details and document are processed for farmer registration and document comparison. OCR is not proof of identity; phone ownership is checked separately by OTP.'),
@@ -43,14 +44,9 @@ export function validateRuntimeConfig() {
     const key = Buffer.from(config.AADHAAR_ENCRYPTION_KEY_BASE64, 'base64');
     if (key.length !== 32) throw new Error('AADHAAR_ENCRYPTION_KEY_BASE64 must decode to exactly 32 bytes');
   }
-  for (const url of [config.OTP_DELIVERY_URL]) {
-    if (url && new URL(url).protocol !== 'https:' && config.NODE_ENV !== 'development' && config.NODE_ENV !== 'test') {
-      throw new Error('Provider URLs must use HTTPS');
-    }
-  }
 }
 
 const usableSecret = (value: string | undefined) => Boolean(value && value.length >= 32 && !value.startsWith('replace-'));
-export const isOtpConfigured = () => Boolean(config.OTP_DELIVERY_URL && config.OTP_DELIVERY_API_KEY && usableSecret(config.OTP_HMAC_SECRET));
+export const isOtpConfigured = () => Boolean(config.MSG91_AUTH_KEY && config.MSG91_REGISTRATION_TEMPLATE_ID && config.MSG91_LOGIN_TEMPLATE_ID && usableSecret(config.OTP_HMAC_SECRET));
 export const areSessionSecretsConfigured = () => usableSecret(config.TOKEN_HMAC_SECRET);
 export const isRegistrationEncryptionConfigured = () => Boolean(config.AADHAAR_ENCRYPTION_KEY_BASE64 && Buffer.from(config.AADHAAR_ENCRYPTION_KEY_BASE64, 'base64').length === 32 && usableSecret(config.AADHAAR_HASH_SECRET));
