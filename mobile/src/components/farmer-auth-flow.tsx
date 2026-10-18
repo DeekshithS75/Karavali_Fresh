@@ -43,6 +43,7 @@ function farmerAuthErrorText(error: unknown, page: Page): TranslationKey {
   if (error.code === 'privacyNoticeOutdated') return 'farmerAuth.privacyNoticeOutdated';
   if (error.code === 'validationFailed') return 'farmerAuth.registrationValidationFailed';
   if (error.code === 'documentMismatch') return 'farmerAuth.documentMismatch';
+  if (error.code === 'documentFieldsMissing') return 'farmerAuth.documentFieldsMissing';
   if (error.code === 'documentUnreadable') return 'farmerAuth.documentUnreadable';
   if (error.code === 'verificationNotConfigured') return 'farmerAuth.phoneVerificationProviderMissing';
   if (error.code === 'verificationProviderFailure') return 'farmerAuth.phoneVerificationProviderFailure';
@@ -164,7 +165,8 @@ export function FarmerAuthFlow({ page }: Props) {
     if (!values.gender) next.gender = 'farmerAuth.error.gender';
     if (!/^\d{10}$/.test(values.phone.replace(/\D/g, ''))) next.phone = 'farmerAuth.error.phone';
     if (!/^\d{12}$/.test(values.aadhaar.replace(/\D/g, ''))) next.aadhaar = 'farmerAuth.error.aadhaar';
-    if (!values.address.trim()) next.address = 'farmerAuth.error.address';
+    const addressWords = new Set((values.address.normalize('NFKC').toLocaleLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? []));
+    if (addressWords.size < 3) next.address = 'farmerAuth.error.address';
     if (!consented) next.consent = 'farmerAuth.error.consent';
     if (!phoneVerificationConsented) next.phoneVerificationConsent = 'farmerAuth.error.phoneVerificationConsent';
     if (!documentUri) next.document = 'farmerAuth.error.document';
@@ -179,8 +181,10 @@ export function FarmerAuthFlow({ page }: Props) {
       return;
     }
     setBusy(true);
+    let submitted = false;
     try {
       const result = await submitFarmerRegistration(values, documentUri, documentType, capabilities!.privacyNoticeVersion!);
+      submitted = true;
       const failed = result.status === 'failed' || result.documentComparison === 'failed';
       farmerAuthRuntime.setPhone(values.phone);
       farmerAuthRuntime.setVerification(result.verificationId, failed ? 'failed' : 'pending');
@@ -192,11 +196,13 @@ export function FarmerAuthFlow({ page }: Props) {
       if (error instanceof FarmerAuthError && error.code === 'exists') router.replace('/auth/farmer/login' as never);
       else setNotice(farmerAuthErrorText(error, page));
     } finally {
-      if (documentUri?.startsWith('file://')) {
-        try { new File(documentUri).delete(); } catch { /* Best-effort deletion of temporary picker output. */ }
+      if (submitted) {
+        if (documentUri?.startsWith('file://')) {
+          try { new File(documentUri).delete(); } catch { /* Best-effort cleanup of temporary picker output. */ }
+        }
+        setDocumentUri(null);
+        setValues((current) => ({ ...current, aadhaar: '' }));
       }
-      setDocumentUri(null);
-      setValues((current) => ({ ...current, aadhaar: '' }));
       setBusy(false);
     }
   };

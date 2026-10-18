@@ -7,7 +7,7 @@ import { appendRegistrationDocument } from './document-upload';
 
 const API_BASE = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 
-type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'exists' | 'documentRequired' | 'invalidDocument' | 'documentMismatch' | 'documentUnreadable' | 'verificationNotConfigured' | 'verificationProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound' | 'verificationExpired' | 'configurationIncomplete' | 'privacyNoticeOutdated' | 'validationFailed';
+type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'exists' | 'documentRequired' | 'invalidDocument' | 'documentMismatch' | 'documentUnreadable' | 'documentFieldsMissing' | 'verificationNotConfigured' | 'verificationProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound' | 'verificationExpired' | 'configurationIncomplete' | 'privacyNoticeOutdated' | 'validationFailed';
 export class FarmerAuthError extends Error {
   constructor(readonly code: ApiErrorCode) { super(code); }
 }
@@ -35,10 +35,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   if (!response.ok) {
     if (response.status === 401) throw new FarmerAuthError('unauthorized');
-    const body = await response.json().catch(() => ({})) as { error?: string };
+    const body = await response.json().catch(() => ({})) as { error?: string; issues?: string[]; missingFields?: string[] };
     if ([400, 404, 409, 422, 429, 503].includes(response.status)) {
       if (body.error === 'document_mismatch') throw new FarmerAuthError('documentMismatch');
-      if (body.error === 'document_unreadable') throw new FarmerAuthError('documentUnreadable');
+      if (body.error === 'document_unreadable') throw new FarmerAuthError(body.issues?.includes('required_fields_missing') || Boolean(body.missingFields?.length) ? 'documentFieldsMissing' : 'documentUnreadable');
       if (body.error === 'document_required') throw new FarmerAuthError('documentRequired');
       if (body.error === 'invalid_document') throw new FarmerAuthError('invalidDocument');
       if (body.error === 'phone_verification_provider_not_configured') throw new FarmerAuthError('verificationNotConfigured');

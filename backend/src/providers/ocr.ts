@@ -31,7 +31,7 @@ export type ExtractedAadhaarFields = {
 export type OcrComparison =
   | { status: 'matched'; fields: ExtractedAadhaarFields }
   | { status: 'mismatch'; fields: ExtractedAadhaarFields; mismatches: Array<'name' | 'age' | 'gender' | 'aadhaar' | 'address'> }
-  | { status: 'unreadable'; issues: Array<'low_resolution' | 'too_bright' | 'too_dark' | 'low_contrast' | 'blurred' | 'unsupported_image' | 'text_not_recognized' | 'required_fields_missing'> };
+  | { status: 'unreadable'; issues: Array<'low_resolution' | 'too_bright' | 'too_dark' | 'low_contrast' | 'blurred' | 'unsupported_image' | 'text_not_recognized' | 'required_fields_missing'>; missingFields?: Array<'aadhaar' | 'date_of_birth' | 'gender' | 'name' | 'address'> };
 type OcrIssue = Extract<OcrComparison, { status: 'unreadable' }>['issues'][number];
 
 export type OcrTestExpected = { fullName: string; dateOfBirth: string; gender: RegistrationDetails['gender']; address: string };
@@ -149,13 +149,14 @@ const tokens = (value: string) => normalizeText(value).split(/\s+/).filter((part
 
 function cleanNameLine(line: string): string | null {
   const labelled = nameLabel.exec(line.trim());
-  const candidate = (labelled?.[1] ?? line).trim().replace(/[,:;]+$/u, '').trim();
-  if (!candidate || candidate.length > 70 || /\d/u.test(candidate) || nonNameText.test(candidate) ||
-      aadhaarLabel.test(candidate) || dateLabel.test(candidate) || addressLabel.test(candidate) ||
-      /[^\p{L}\s'’.-]/u.test(candidate)) return null;
-  const parts = tokens(candidate);
-  if (!parts.length || parts.length > 5) return null;
-  return candidate;
+  // Tesseract sometimes merges the Kannada and English name with a serial or
+  // DOB on the same visual line. Inspect text segments around digits separately
+  // so a number cannot become part of the name, while retaining the English name.
+  const candidates = (labelled?.[1] ?? line).split(/\d+/u).map((part) => part.replace(/[,;:|/]+/gu, ' ').trim())
+    .filter((candidate) => candidate.length > 0 && candidate.length <= 70 && !nonNameText.test(candidate) &&
+      !aadhaarLabel.test(candidate) && !dateLabel.test(candidate) && !addressLabel.test(candidate) &&
+      !/[^\p{L}\s'’.-]/u.test(candidate) && tokens(candidate).length > 0 && tokens(candidate).length <= 5);
+  return candidates.find((candidate) => /\p{Script=Latin}/u.test(candidate)) ?? candidates[0] ?? null;
 }
 
 function extractFullName(lines: string[], dateIndex: number): string | null {
@@ -219,7 +220,9 @@ export function extractAadhaarFieldsFromLines(lines: OcrLine[]): ExtractedAadhaa
     for (let i = 0; i < texts.length; i++) {
       const match = texts[i]!.match(/\b\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/);
       if (!match) continue;
-      const nearby = texts.slice(Math.max(0, i - 2), i + 1).join(' ');
+      // OCR can order the printed number before its label even when the label
+      // appears above it visually, especially on the lower Aadhaar card panel.
+      const nearby = texts.slice(Math.max(0, i - 2), Math.min(texts.length, i + 3)).join(' ');
       if (aadhaarLabel.test(nearby)) matches.push(match[0].replace(/\D/g, ''));
     }
     return matches.find((value) => value.length === 12) ?? null;
@@ -282,7 +285,7 @@ export async function compareAadhaarDocument(buffer: Buffer, mimeType: string, e
     if (!fields.gender) missing.push('gender');
     if (!fields.fullName) missing.push('name');
     if (!fields.addressText) missing.push('address');
-    if (missing.length) return { status: 'unreadable', issues: ['required_fields_missing'] };
+    if (missing.length) return { status: 'unreadable', issues: ['required_fields_missing'], missingFields: missing as NonNullable<Extract<OcrComparison, { status: 'unreadable' }>['missingFields']> };
     const comparison = compareExtractedFields(fields, entered, now);
     const mismatches = (Object.entries(comparison) as Array<[keyof typeof comparison, boolean]>)
       .filter(([, equal]) => !equal).map(([field]) => field);

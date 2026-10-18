@@ -16,6 +16,10 @@ export async function assertRegistrationAvailable(phone: string, phoneHash: stri
 }
 
 export async function enforceRateLimit(key: string, limit: number, windowMs: number) {
+  // Keep development testing unblocked. Test and production environments retain
+  // the configured limits, and provider-side limits still apply independently.
+  if (config.NODE_ENV === 'development') return;
+
   const now = new Date();
   const start = new Date(now.getTime() - windowMs);
   const collection = RateLimitModel.collection as unknown as Collection<{ _id: string; windowStartedAt: Date; count: number; expiresAt: Date }>;

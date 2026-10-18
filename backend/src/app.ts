@@ -120,13 +120,17 @@ app.post('/api/farmer/registrations', upload.single('document'), async (request,
     }
     const aadhaarHash = hashAadhaar(data.aadhaar);
     const phoneHash = hashPhone(data.phone);
-    await enforceRateLimit(`registration-ip:${hmac(request.ip ?? 'unknown')}`, 10, 24 * 60 * 60_000);
-    await enforceRateLimit(`registration:${phoneHash}`, 3, 24 * 60 * 60_000);
+    await enforceRateLimit(`registration-ip:${hmac(request.ip ?? 'unknown')}`, 50, 24 * 60 * 60_000);
+    await enforceRateLimit(`registration:${phoneHash}`, 10, 24 * 60 * 60_000);
     await PendingRegistrationModel.deleteMany({ expiresAt: { $lte: new Date() }, $or: [{ phoneHash }, { aadhaarHash }] });
     await assertRegistrationAvailable(data.phone, phoneHash, aadhaarHash);
 
     const comparison = await compareAadhaarDocument(request.file.buffer, request.file.mimetype, data);
-    if (comparison.status === 'unreadable') return response.status(422).json({ error: 'document_unreadable', issues: comparison.issues });
+    if (comparison.status === 'unreadable') return response.status(422).json({
+      error: 'document_unreadable',
+      issues: comparison.issues,
+      ...(comparison.missingFields ? { missingFields: comparison.missingFields } : {}),
+    });
     if (comparison.status === 'mismatch') return response.status(422).json({ error: 'document_mismatch', fields: comparison.mismatches });
 
     const now = new Date();

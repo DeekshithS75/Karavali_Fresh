@@ -58,6 +58,30 @@ test('uses bilingual labels and does not assume the name/address blocks occupy f
   });
 });
 
+test('associates the Aadhaar number when OCR orders it before its printed label', () => {
+  const numberBeforeLabel = extractAadhaarFieldsFromLines([
+    { text: '9999 8888 7777', confidence: 95 },
+    { text: 'Your Aadhaar No.', confidence: 90 },
+    ...lines.slice(7),
+  ]);
+  assert.equal(numberBeforeLabel.aadhaarNumber, '999988887777');
+});
+
+test('extracts the lower-card English name when OCR merges bilingual text with a number', () => {
+  const fields = extractAadhaarFieldsFromLines([
+    { text: 'To', confidence: 95 },
+    { text: 'Sample Farmer', confidence: 95 },
+    { text: 'Aadhaar No.', confidence: 95 },
+    { text: '9999 8888 7777', confidence: 95 },
+    { text: 'ದೀಕ್ಷಿತ್ 03 Deekshith', confidence: 85 },
+    { text: 'DOB: 01/01/1980', confidence: 95 },
+    { text: 'Gender: Male', confidence: 95 },
+    { text: 'Address', confidence: 95 },
+    { text: 'Village Example District Example Karnataka', confidence: 95 },
+  ]);
+  assert.equal(fields.fullName, 'Deekshith');
+});
+
 test('does not extract an upper address recipient as the lower-section full name', () => {
   const upperOnly = extractAadhaarFieldsFromLines([
     { text: 'To', confidence: 95 },
