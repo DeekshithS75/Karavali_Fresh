@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { areSessionSecretsConfigured, config, isPhoneVerificationConfigured, isRegistrationEncryptionConfigured } from './config.js';
 import { decryptSecretValue, encryptSecretValue, hashAadhaar, hashPhone, hmac } from './crypto.js';
 import { FarmerModel, PendingRegistrationModel } from './models/index.js';
-import { compareAadhaarDocument, isOcrConfigured, OCR_ENGINE_NAME, testAadhaarDocument, type OcrTestExpected, type RegistrationDetails } from './providers/ocr.js';
+import { compareAadhaarDocument, isOcrConfigured, OCR_ENGINE_NAME, type RegistrationDetails } from './providers/ocr.js';
 import { NaCallerError } from './providers/otp.js';
 import { ProviderNotConfiguredError } from './providers/errors.js';
 import { ApiError, assertRegistrationAvailable, cancelPhoneVerification, completePhoneVerification, createSession, enforceRateLimit, findAuthenticatedFarmer, getPhoneVerificationStatus, startPhoneVerification } from './services/security.js';
@@ -38,16 +38,6 @@ const registrationSchema = z.object({
   consent: z.literal('true'),
   phoneVerificationConsent: z.literal('true'),
   privacyNoticeVersion: z.string().min(1).max(80),
-});
-const ocrTestSchema = z.object({
-  mode: z.literal('ocr-test'),
-  fullName: z.string().trim().min(2).max(120),
-  dateOfBirth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
-    const date = new Date(`${value}T00:00:00.000Z`);
-    return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value;
-  }),
-  gender: z.enum(['male', 'female', 'other']),
-  address: z.string().trim().min(3).max(500),
 });
 const challengeIdSchema = z.string().regex(/^[a-f\d]{24}$/i);
 type PendingFarmerDetails = Omit<RegistrationDetails, 'aadhaar'>;
@@ -121,14 +111,6 @@ app.post('/api/farmer/auth/lookup', async (request, response) => {
 
 app.post('/api/farmer/registrations', upload.single('document'), async (request, response) => {
   try {
-    if (request.body?.mode === 'ocr-test') {
-      if (config.NODE_ENV === 'production' || !config.OCR_TEST_MODE_ENABLED) throw new ApiError(404, 'route_not_found');
-      const expected = ocrTestSchema.parse(request.body) as OcrTestExpected & { mode: 'ocr-test' };
-      if (!request.file || !request.file.buffer.length) throw new ApiError(400, 'document_required');
-      if (!isOcrConfigured()) throw new ProviderNotConfiguredError('ocr');
-      const result = await testAadhaarDocument(request.file.buffer, request.file.mimetype, expected);
-      return response.status(result.status === 'unreadable' ? 422 : 200).json(result);
-    }
     const data = registrationSchema.parse(request.body) as RegistrationDetails & { consent: 'true'; phoneVerificationConsent: 'true'; privacyNoticeVersion: string };
     if (data.privacyNoticeVersion !== config.PRIVACY_NOTICE_VERSION) throw new ApiError(400, 'privacy_notice_version_mismatch');
     if (!request.file || !request.file.buffer.length) throw new ApiError(400, 'document_required');

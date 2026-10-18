@@ -11,7 +11,6 @@ const schema = z.object({
   AADHAAR_HASH_SECRET: z.string().optional(),
   AADHAAR_ENCRYPTION_KEY_BASE64: z.string().optional(),
   NACALLER_KEY: z.string().optional(),
-  OCR_TEST_MODE_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   PRIVACY_NOTICE_VERSION: z.string().default('farmer-registration-phone-v2'),
   PRIVACY_NOTICE_EN: z.string().default('Your details and document are processed for farmer registration and document comparison. OCR is not proof of identity; control of the supplied phone number is checked separately through a missed call.'),
   PRIVACY_NOTICE_KN: z.string().default('ರೈತರ ನೋಂದಣಿ ಮತ್ತು ದಾಖಲೆ ಹೋಲಿಕೆಗಾಗಿ ನಿಮ್ಮ ವಿವರಗಳನ್ನು ಸಂಸ್ಕರಿಸಲಾಗುತ್ತದೆ. OCR ಗುರುತಿನ ಪುರಾವೆಯಲ್ಲ; ನೀಡಿದ ಫೋನ್ ಸಂಖ್ಯೆಯ ಬಳಕೆಯನ್ನು ಮಿಸ್ಡ್ ಕಾಲ್ ಮೂಲಕ ಪ್ರತ್ಯೇಕವಾಗಿ ಪರಿಶೀಲಿಸಲಾಗುತ್ತದೆ.'),

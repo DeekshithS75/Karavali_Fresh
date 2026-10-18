@@ -38,6 +38,10 @@ function farmerAuthErrorText(error: unknown, page: Page): TranslationKey {
   if (error.code === 'apiUrlMissing') return 'farmerAuth.apiConfigurationMissing';
   if (error.code === 'urlNotAllowed') return 'farmerAuth.apiUrlNotAllowed';
   if (error.code === 'configurationIncomplete') return 'farmerAuth.backendConfigurationIncomplete';
+  if (error.code === 'documentRequired') return 'farmerAuth.error.document';
+  if (error.code === 'invalidDocument') return 'farmerAuth.invalidDocument';
+  if (error.code === 'privacyNoticeOutdated') return 'farmerAuth.privacyNoticeOutdated';
+  if (error.code === 'validationFailed') return 'farmerAuth.registrationValidationFailed';
   if (error.code === 'documentMismatch') return 'farmerAuth.documentMismatch';
   if (error.code === 'documentUnreadable') return 'farmerAuth.documentUnreadable';
   if (error.code === 'verificationNotConfigured') return 'farmerAuth.phoneVerificationProviderMissing';
@@ -428,7 +432,6 @@ export function FarmerAuthFlow({ page }: Props) {
     {page === 'register' ? <View style={styles.card}>
       <Text style={styles.eyebrow}>{t('auth.role.farmer')}</Text><Text style={styles.title}>{t('farmerAuth.registerTitle')}</Text>
       <Text style={styles.intro}>{t('farmerAuth.registerIntro')}</Text>{banner}
-      {__DEV__ ? <Pressable accessibilityRole="button" disabled={busy} onPress={() => router.push('/auth/farmer/ocr-test' as never)} style={[styles.secondaryButton, busy && styles.disabled]}><Text style={styles.linkText}>{t('ocrTest.open')}</Text></Pressable> : null}
       {field('fullName', 'farmerAuth.fullName', 'farmerAuth.fullNamePlaceholder')}
       {field('age', 'farmerAuth.age', 'farmerAuth.agePlaceholder', { keyboard: 'number-pad', maxLength: 3 })}
       <Text style={styles.label}>{t('farmerAuth.gender')}</Text>
@@ -455,7 +458,6 @@ export function FarmerAuthFlow({ page }: Props) {
       {!loadingCapabilities && !canCollectIdentity ? <Text style={styles.warning}>{t('farmerAuth.providerMissing')}</Text> : null}
       {noticeView}
       {button('farmerAuth.submitRegistration', submitRegistration, !canCollectIdentity)}
-      {__DEV__ ? <Text style={styles.devNote}>{t('farmerAuth.devMockNote')}</Text> : null}
     </View> : null}
 
     {page === 'login' ? <View style={styles.card}>
@@ -534,7 +536,7 @@ const styles = StyleSheet.create({
   back: { minHeight: 42, justifyContent: 'center', paddingHorizontal: 8 }, backText: { color: MarketColors.green, fontSize: 14, fontWeight: '700' },
   brand: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 18 }, brandMark: { width: 43, height: 43, borderRadius: 15, backgroundColor: MarketColors.green, alignItems: 'center', justifyContent: 'center' }, brandGlyph: { color: '#fff', fontSize: 26, lineHeight: 30 }, brandName: { color: MarketColors.text, fontSize: 17, fontWeight: '800' }, brandRegion: { color: MarketColors.muted, fontSize: 9, fontWeight: '700', letterSpacing: 1.1, marginTop: 2 },
   card: { backgroundColor: MarketColors.card, borderRadius: 22, borderWidth: 1, borderColor: MarketColors.border, padding: 20, gap: 12 }, eyebrow: { color: MarketColors.blue, fontSize: 11, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 1 }, title: { color: MarketColors.text, fontSize: 25, fontWeight: '800' }, intro: { color: MarketColors.muted, fontSize: 14, lineHeight: 20 }, demoBanner: { borderRadius: 13, backgroundColor: MarketColors.blueSoft, padding: 12 }, demoText: { color: MarketColors.blue, fontSize: 12, lineHeight: 18, fontWeight: '600' },
-  field: { gap: 6 }, label: { color: MarketColors.text, fontSize: 13, fontWeight: '700' }, input: { minHeight: 48, borderWidth: 1, borderColor: MarketColors.border, borderRadius: 12, backgroundColor: MarketColors.background, paddingHorizontal: 12, color: MarketColors.text, fontSize: 14 }, help: { color: MarketColors.muted, fontSize: 11, lineHeight: 16 }, error: { color: '#B42318', fontSize: 12 }, notice: { color: MarketColors.blue, fontSize: 13, lineHeight: 19 }, warning: { color: '#8A5A00', backgroundColor: '#FFF4D6', borderRadius: 12, padding: 11, fontSize: 12, lineHeight: 18 }, warningText: { color: '#8A5A00', fontSize: 12, lineHeight: 18 }, devNote: { color: MarketColors.muted, fontSize: 11, lineHeight: 16 },
+  field: { gap: 6 }, label: { color: MarketColors.text, fontSize: 13, fontWeight: '700' }, input: { minHeight: 48, borderWidth: 1, borderColor: MarketColors.border, borderRadius: 12, backgroundColor: MarketColors.background, paddingHorizontal: 12, color: MarketColors.text, fontSize: 14 }, help: { color: MarketColors.muted, fontSize: 11, lineHeight: 16 }, error: { color: '#B42318', fontSize: 12 }, notice: { color: MarketColors.blue, fontSize: 13, lineHeight: 19 }, warning: { color: '#8A5A00', backgroundColor: '#FFF4D6', borderRadius: 12, padding: 11, fontSize: 12, lineHeight: 18 }, warningText: { color: '#8A5A00', fontSize: 12, lineHeight: 18 },
   phoneInputRow: { flexDirection: 'row', gap: 8 }, countryPrefix: { minHeight: 48, minWidth: 60, justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: MarketColors.border, borderRadius: 12, backgroundColor: MarketColors.background }, countryPrefixText: { color: MarketColors.text, fontSize: 14, fontWeight: '700' }, phoneInput: { flex: 1 },
   genderRow: { flexDirection: 'row', gap: 7 }, genderOption: { flex: 1, minHeight: 42, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: MarketColors.border, borderRadius: 12, paddingHorizontal: 5 }, genderSelected: { backgroundColor: MarketColors.greenSoft, borderColor: MarketColors.green }, genderText: { color: MarketColors.text, fontSize: 12, fontWeight: '600' },
   consentRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, paddingVertical: 4 }, checkbox: { width: 22, height: 22, borderRadius: 6, borderWidth: 1, borderColor: MarketColors.green, alignItems: 'center', justifyContent: 'center' }, checkboxChecked: { backgroundColor: MarketColors.green }, checkmark: { color: '#fff', fontSize: 15, fontWeight: '800' }, consentText: { flex: 1, color: MarketColors.text, fontSize: 12, lineHeight: 18 },

@@ -2,12 +2,12 @@ import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { restoreFarmerSession, revokeFarmerSession, type FarmerSessionState } from './session-lifecycle';
+import { createFarmerSessionStorage, type SessionTokens } from './session-storage';
+import { appendRegistrationDocument } from './document-upload';
 
-const SESSION_KEY = 'karavali-fresh.farmer.session.v1';
 const API_BASE = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 
-type SessionTokens = { accessToken: string; refreshToken?: string };
-type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'testModeDisabled' | 'network' | 'unauthorized' | 'rejected' | 'exists' | 'documentMismatch' | 'documentUnreadable' | 'verificationNotConfigured' | 'verificationProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound' | 'verificationExpired' | 'configurationIncomplete';
+type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'exists' | 'documentRequired' | 'invalidDocument' | 'documentMismatch' | 'documentUnreadable' | 'verificationNotConfigured' | 'verificationProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound' | 'verificationExpired' | 'configurationIncomplete' | 'privacyNoticeOutdated' | 'validationFailed';
 export class FarmerAuthError extends Error {
   constructor(readonly code: ApiErrorCode) { super(code); }
 }
@@ -35,16 +35,21 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   if (!response.ok) {
     if (response.status === 401) throw new FarmerAuthError('unauthorized');
-    if ([422, 429, 503, 404].includes(response.status)) {
-      const body = await response.json().catch(() => ({})) as { error?: string };
+    const body = await response.json().catch(() => ({})) as { error?: string };
+    if ([400, 404, 409, 422, 429, 503].includes(response.status)) {
       if (body.error === 'document_mismatch') throw new FarmerAuthError('documentMismatch');
       if (body.error === 'document_unreadable') throw new FarmerAuthError('documentUnreadable');
+      if (body.error === 'document_required') throw new FarmerAuthError('documentRequired');
+      if (body.error === 'invalid_document') throw new FarmerAuthError('invalidDocument');
       if (body.error === 'phone_verification_provider_not_configured') throw new FarmerAuthError('verificationNotConfigured');
       if (['verification_provider_unavailable', 'verification_provider_response_invalid', 'verification_request_unavailable', 'verification_credits_exhausted', 'verification_line_not_configured'].includes(body.error ?? '')) throw new FarmerAuthError('verificationProviderFailure');
       if (body.error === 'verification_expired') throw new FarmerAuthError('verificationExpired');
       if (body.error === 'rate_limit_exceeded' || body.error === 'verification_resend_too_soon') throw new FarmerAuthError('rateLimited');
       if (body.error === 'ocr_engine_not_configured') throw new FarmerAuthError('ocrUnavailable');
       if (body.error === 'farmer_not_found') throw new FarmerAuthError('farmerNotFound');
+      if (body.error === 'registration_encryption_not_configured' || body.error === 'session_signing_not_configured') throw new FarmerAuthError('configurationIncomplete');
+      if (body.error === 'privacy_notice_version_mismatch') throw new FarmerAuthError('privacyNoticeOutdated');
+      if (body.error === 'validation_failed') throw new FarmerAuthError('validationFailed');
     }
     throw new FarmerAuthError(response.status === 404 || response.status === 503 ? 'unavailable' : response.status === 409 ? 'exists' : 'rejected');
   }
@@ -52,38 +57,22 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function readTokens(): Promise<SessionTokens | null> {
-  const stored = Platform.OS === 'web'
-    ? await AsyncStorage.getItem(SESSION_KEY)
-    : await SecureStore.getItemAsync(SESSION_KEY);
-  if (!stored) return null;
-  try {
-    const parsed = JSON.parse(stored) as SessionTokens;
-    if (typeof parsed.accessToken === 'string' && parsed.accessToken.length > 0) return parsed;
-    if (Platform.OS === 'web') await AsyncStorage.removeItem(SESSION_KEY);
-    else await SecureStore.deleteItemAsync(SESSION_KEY);
-    return null;
-  } catch {
-    if (Platform.OS === 'web') await AsyncStorage.removeItem(SESSION_KEY);
-    else await SecureStore.deleteItemAsync(SESSION_KEY);
-    return null;
-  }
-}
+const sessionStorage = createFarmerSessionStorage(Platform.OS === 'web'
+  ? AsyncStorage
+  : {
+    getItem: (key: string) => SecureStore.getItemAsync(key),
+    setItem: (key: string, value: string) => SecureStore.setItemAsync(key, value),
+    removeItem: (key: string) => SecureStore.deleteItemAsync(key),
+  });
+
+const readTokens = () => sessionStorage.read();
 
 export async function hasStoredFarmerSession() {
   return (await readTokens()) !== null;
 }
 
-async function saveTokens(tokens: SessionTokens) {
-  const serialized = JSON.stringify(tokens);
-  if (Platform.OS === 'web') await AsyncStorage.setItem(SESSION_KEY, serialized);
-  else await SecureStore.setItemAsync(SESSION_KEY, serialized);
-}
-
-async function clearTokens() {
-  if (Platform.OS === 'web') await AsyncStorage.removeItem(SESSION_KEY);
-  else await SecureStore.deleteItemAsync(SESSION_KEY);
-}
+const saveTokens = (tokens: SessionTokens) => sessionStorage.save(tokens);
+const clearTokens = () => sessionStorage.clear();
 
 export type FarmerCapabilities = {
   registrationEnabled: boolean;
@@ -99,43 +88,6 @@ export type FarmerCapabilities = {
   privacyNotice: Partial<Record<'en' | 'kn' | 'tcy', string>>;
 };
 export type FarmerRegistration = { fullName: string; age: string; gender: string; phone: string; aadhaar: string; address: string };
-export type FarmerOcrTestInput = { fullName: string; dateOfBirth: string; gender: 'male' | 'female' | 'other'; address: string };
-export type FarmerOcrTestResult = {
-  status: 'match' | 'mismatch' | 'unreadable';
-  extracted: { fullName: string | null; dateOfBirth: string | null; gender: 'male' | 'female' | 'other' | null; address: string | null };
-  comparisons: Record<'fullName' | 'dateOfBirth' | 'gender' | 'address', 'match' | 'mismatch' | 'unreadable'>;
-  issues?: string[];
-};
-
-/** Uses the existing registration URL in explicitly enabled development OCR-test mode. No auth token is sent. */
-export async function runFarmerOcrTest(data: FarmerOcrTestInput, imageUri: string, imageType: string, imageName: string): Promise<FarmerOcrTestResult> {
-  const body = new FormData();
-  body.append('mode', 'ocr-test');
-  body.append('fullName', data.fullName.trim());
-  body.append('dateOfBirth', data.dateOfBirth);
-  body.append('gender', data.gender);
-  body.append('address', data.address.trim());
-  if (Platform.OS === 'web') {
-    let imageResponse: Response;
-    try { imageResponse = await fetch(imageUri); } catch { throw new FarmerAuthError('rejected'); }
-    if (!imageResponse.ok) throw new FarmerAuthError('rejected');
-    body.append('document', await imageResponse.blob(), imageName || 'ocr-test-image');
-  } else {
-    body.append('document', { uri: imageUri, name: imageName || 'ocr-test-image', type: imageType } as never);
-  }
-  let response: Response;
-  try { response = await fetch(apiUrl('/api/farmer/registrations'), { method: 'POST', body }); }
-  catch (error) { if (error instanceof FarmerAuthError) throw error; throw new FarmerAuthError('network'); }
-  const payload = await response.json().catch(() => null) as FarmerOcrTestResult | { error?: string } | null;
-  if (payload && 'status' in payload && ['match', 'mismatch', 'unreadable'].includes(payload.status)) return payload as FarmerOcrTestResult;
-  if (payload && 'error' in payload) {
-    if (payload.error === 'route_not_found') throw new FarmerAuthError('testModeDisabled');
-    if (payload.error === 'ocr_engine_not_configured' || payload.error === 'ocr_engine_unavailable') throw new FarmerAuthError('ocrUnavailable');
-    if (payload.error === 'document_required' || payload.error === 'invalid_document') throw new FarmerAuthError('rejected');
-  }
-  throw new FarmerAuthError('rejected');
-}
-
 export async function getFarmerCapabilities() {
   return request<FarmerCapabilities>('/api/farmer/auth/capabilities');
 }
@@ -177,7 +129,8 @@ export async function submitFarmerRegistration(data: FarmerRegistration, imageUr
   body.append('consent', 'true');
   body.append('phoneVerificationConsent', 'true');
   body.append('privacyNoticeVersion', privacyNoticeVersion);
-  body.append('document', { uri: imageUri, name: 'identity-document', type: imageType } as never);
+  try { await appendRegistrationDocument(body, imageUri, imageType, Platform.OS === 'web' ? 'web' : 'native'); }
+  catch { throw new FarmerAuthError('invalidDocument'); }
   const result = await request<{
     status: 'pending' | 'failed';
     documentComparison: 'pending' | 'passed' | 'failed';
