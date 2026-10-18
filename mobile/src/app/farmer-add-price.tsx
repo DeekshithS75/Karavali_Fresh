@@ -1,10 +1,11 @@
 import { router, useLocalSearchParams } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { BrandHeader, MarketColors, ScreenFrame } from '@/components/marketplace-ui';
 import { FarmerDashboardGuard } from '@/components/farmer-auth-flow';
-import { FarmerAuthError, getFarmerProduce, getFarmerSessionState, updateFarmerProducePrice, type FarmerProduce } from '@/features/farmer-auth/client';
+import { FarmerAuthError, getFarmerMarketQuote, getFarmerProduce, getFarmerSessionState, updateFarmerProducePrice, type FarmerMarketComparison, type FarmerProduce } from '@/features/farmer-auth/client';
+import { FarmerMarketResults } from '@/components/farmer-market-results';
 import { useLanguage } from '@/localization/LanguageProvider';
 
 export default function FarmerAddPriceScreen() {
@@ -16,6 +17,13 @@ export default function FarmerAddPriceScreen() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
+  const [marketQuote, setMarketQuote] = useState<FarmerMarketComparison | null>(null);
+  const [marketQuoteLoading, setMarketQuoteLoading] = useState(false);
+  const [marketQuoteError, setMarketQuoteError] = useState<string | null>(null);
+  const marketQuoteController = useRef<AbortController | null>(null);
+  const autoQuoteFor = useRef<string | null>(null);
+
+  useEffect(() => () => marketQuoteController.current?.abort(), []);
 
   useEffect(() => {
     let active = true;
@@ -44,6 +52,38 @@ export default function FarmerAddPriceScreen() {
     setError(null);
     setRetry((value) => value + 1);
   };
+
+  const showMarketQuote = useCallback(async () => {
+    if (!item || marketQuoteLoading) return;
+    marketQuoteController.current?.abort();
+    const controller = new AbortController();
+    marketQuoteController.current = controller;
+    setMarketQuoteLoading(true);
+    setMarketQuoteError(null);
+    try {
+      setMarketQuote(await getFarmerMarketQuote({ commodity: item.name, nameTranslations: item.nameTranslations, unit: item.unit }, controller.signal));
+    } catch (reason) {
+      if (controller.signal.aborted) return;
+      if (reason instanceof FarmerAuthError && reason.code === 'unauthorized') {
+        const state = await getFarmerSessionState();
+        if (state === 'missing' || state === 'invalid') { router.replace('/auth/farmer'); return; }
+      }
+      setMarketQuoteError(reason instanceof FarmerAuthError && reason.code === 'marketPriceNotConfigured' ? 'farmer.prices.notConfigured'
+        : reason instanceof FarmerAuthError && reason.code === 'marketPriceInvalidKey' ? 'farmer.prices.invalidKey'
+          : reason instanceof FarmerAuthError && reason.code === 'marketPriceRateLimited' ? 'farmer.prices.rateLimited'
+            : reason instanceof FarmerAuthError && reason.code === 'marketCommodityUnrecognized' ? 'farmer.prices.unavailableVegetable'
+              : 'farmer.prices.quoteError');
+    } finally {
+      if (marketQuoteController.current === controller) { marketQuoteController.current = null; setMarketQuoteLoading(false); }
+    }
+  }, [item, marketQuoteLoading]);
+
+  useEffect(() => {
+    if (item && autoQuoteFor.current !== item.id) {
+      autoQuoteFor.current = item.id;
+      void showMarketQuote();
+    }
+  }, [item, showMarketQuote]);
 
   const save = async () => {
     const parsed = Number(price);
@@ -82,6 +122,16 @@ export default function FarmerAddPriceScreen() {
       </View> : item ? <>
         <Text style={styles.name}>{item.nameTranslations?.[language]?.trim() || item.name}</Text>
         <Text style={styles.help}>{t('produce.availableQuantity').replace('{quantity}', String(item.quantity)).replace('{unit}', t(`produce.unit.${item.unit}` as Parameters<typeof t>[0]))}</Text>
+        <View style={styles.marketQuoteBox}>
+          <Text style={styles.label}>{t('farmer.prices.beforePriceTitle')}</Text>
+          <Text style={styles.help}>{t('farmer.prices.beforePriceHelp')}</Text>
+          <Pressable accessibilityRole="button" disabled={marketQuoteLoading || saving} onPress={() => void showMarketQuote()} style={[styles.quoteButton, (marketQuoteLoading || saving) && styles.disabled]}>
+            {marketQuoteLoading ? <ActivityIndicator color={MarketColors.green} /> : <Text style={styles.quoteButtonText}>{t(marketQuote ? 'farmer.prices.retry' : 'farmer.prices.quoteButton')}</Text>}
+          </Pressable>
+          {marketQuoteLoading ? <Text style={styles.help}>{t('farmer.prices.quoteLoading')}</Text> : null}
+          {marketQuoteError ? <Text accessibilityRole="alert" style={styles.error}>{t(marketQuoteError as Parameters<typeof t>[0])}</Text> : null}
+          {marketQuote ? <FarmerMarketResults comparison={marketQuote} t={t} language={language} /> : null}
+        </View>
         <View style={styles.field}>
           <Text style={styles.label}>{t('produce.sellingPrice')} *</Text>
           <View style={styles.priceRow}><Text style={styles.currency}>₹</Text><TextInput editable={!saving} value={price} onChangeText={(value) => { setPrice(value.replace(/[^\d.]/g, '')); setError(null); }} keyboardType="decimal-pad" inputMode="decimal" placeholder={t('produce.pricePlaceholder')} placeholderTextColor={MarketColors.muted} accessibilityLabel={`${t('produce.sellingPrice')} ${t(`produce.priceUnit.${item.unit}` as Parameters<typeof t>[0])}`} style={styles.input} /><Text style={styles.unit}>/ {t(`produce.priceUnit.${item.unit}` as Parameters<typeof t>[0])}</Text></View>
@@ -99,6 +149,6 @@ const styles = StyleSheet.create({
   back: { minHeight: 38, justifyContent: 'center', alignSelf: 'flex-start', marginBottom: 8 }, backText: { color: MarketColors.green, fontWeight: '700' },
   card: { backgroundColor: MarketColors.card, borderRadius: 22, borderWidth: 1, borderColor: MarketColors.border, padding: 20, gap: 14 },
   eyebrow: { color: MarketColors.blue, fontSize: 11, fontWeight: '800', letterSpacing: 1 }, title: { color: MarketColors.text, fontSize: 24, fontWeight: '800' }, intro: { color: MarketColors.muted, fontSize: 13, lineHeight: 19 }, name: { color: MarketColors.text, fontSize: 18, fontWeight: '800' },
-  field: { gap: 8, marginTop: 6 }, label: { color: MarketColors.text, fontSize: 14, fontWeight: '700' }, priceRow: { flexDirection: 'row', alignItems: 'center', gap: 8 }, currency: { color: MarketColors.text, fontSize: 17, fontWeight: '800' }, input: { minHeight: 48, flex: 1, borderWidth: 1, borderColor: MarketColors.border, borderRadius: 12, backgroundColor: MarketColors.background, paddingHorizontal: 12, color: MarketColors.text, fontSize: 15 }, unit: { color: MarketColors.greenDark, fontWeight: '800', fontSize: 13 }, help: { color: MarketColors.muted, fontSize: 12, lineHeight: 17 }, estimate: { color: MarketColors.greenDark, fontSize: 13, fontWeight: '700' },
+  field: { gap: 8, marginTop: 6 }, label: { color: MarketColors.text, fontSize: 14, fontWeight: '700' }, marketQuoteBox: { gap: 9, backgroundColor: MarketColors.background, borderRadius: 14, padding: 12 }, quoteButton: { minHeight: 44, borderRadius: 11, borderWidth: 1.3, borderColor: MarketColors.green, alignItems: 'center', justifyContent: 'center' }, quoteButtonText: { color: MarketColors.greenDark, fontWeight: '800' }, priceRow: { flexDirection: 'row', alignItems: 'center', gap: 8 }, currency: { color: MarketColors.text, fontSize: 17, fontWeight: '800' }, input: { minHeight: 48, flex: 1, borderWidth: 1, borderColor: MarketColors.border, borderRadius: 12, backgroundColor: MarketColors.background, paddingHorizontal: 12, color: MarketColors.text, fontSize: 15 }, unit: { color: MarketColors.greenDark, fontWeight: '800', fontSize: 13 }, help: { color: MarketColors.muted, fontSize: 12, lineHeight: 17 }, estimate: { color: MarketColors.greenDark, fontSize: 13, fontWeight: '700' },
   loading: { minHeight: 90, gap: 10, justifyContent: 'center', alignItems: 'center' }, errorBox: { backgroundColor: '#FFF4D6', padding: 12, borderRadius: 12, gap: 8 }, error: { color: '#B42318', fontSize: 13, lineHeight: 18 }, retry: { minHeight: 40, justifyContent: 'center', alignSelf: 'flex-start' }, retryText: { color: MarketColors.greenDark, fontWeight: '800' }, save: { minHeight: 50, borderRadius: 13, backgroundColor: MarketColors.green, alignItems: 'center', justifyContent: 'center', marginTop: 6 }, saveText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' }, disabled: { opacity: 0.55 },
 });

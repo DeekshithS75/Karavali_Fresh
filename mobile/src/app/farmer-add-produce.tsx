@@ -6,7 +6,8 @@ import * as ImagePicker from 'expo-image-picker';
 
 import { BrandHeader, MarketColors, ScreenFrame, SectionHeading } from '@/components/marketplace-ui';
 import { FarmerDashboardGuard } from '@/components/farmer-auth-flow';
-import { createFarmerProduce, type FarmerProduce } from '@/features/farmer-auth/client';
+import { FarmerAuthError, createFarmerProduce, getFarmerMarketQuote, getFarmerSessionState, type FarmerMarketComparison, type FarmerProduce } from '@/features/farmer-auth/client';
+import { FarmerMarketResults } from '@/components/farmer-market-results';
 import { speechRecognition } from '@/features/produce/speech-recognition';
 import { useLanguage } from '@/localization/LanguageProvider';
 
@@ -35,7 +36,50 @@ export default function FarmerAddProduceScreen() {
   const [capturing, setCapturing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [recognizing, setRecognizing] = useState(false);
+  const [marketQuote, setMarketQuote] = useState<FarmerMarketComparison | null>(null);
+  const [marketQuoteLoading, setMarketQuoteLoading] = useState(false);
+  const [marketQuoteError, setMarketQuoteError] = useState<string | null>(null);
+  const marketQuoteController = useRef<AbortController | null>(null);
   const submissionId = useRef(createSubmissionId());
+
+  useEffect(() => () => marketQuoteController.current?.abort(), []);
+
+  const resetMarketQuote = () => {
+    marketQuoteController.current?.abort();
+    marketQuoteController.current = null;
+    setMarketQuoteLoading(false);
+    setMarketQuote(null);
+    setMarketQuoteError(null);
+  };
+
+  const showMarketQuote = async () => {
+    if (!name.trim() || marketQuoteLoading) return;
+    marketQuoteController.current?.abort();
+    const controller = new AbortController();
+    marketQuoteController.current = controller;
+    setMarketQuoteLoading(true);
+    setMarketQuoteError(null);
+    try {
+      const result = await getFarmerMarketQuote({ commodity: name.trim(), unit }, controller.signal);
+      setMarketQuote(result);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (error instanceof FarmerAuthError && error.code === 'unauthorized') {
+        const session = await getFarmerSessionState();
+        if (session === 'missing' || session === 'invalid') { router.replace('/auth/farmer'); return; }
+      }
+      setMarketQuoteError(error instanceof FarmerAuthError && error.code === 'marketPriceNotConfigured' ? 'farmer.prices.notConfigured'
+        : error instanceof FarmerAuthError && error.code === 'marketPriceInvalidKey' ? 'farmer.prices.invalidKey'
+          : error instanceof FarmerAuthError && error.code === 'marketPriceRateLimited' ? 'farmer.prices.rateLimited'
+            : error instanceof FarmerAuthError && error.code === 'marketCommodityUnrecognized' ? 'farmer.prices.unavailableVegetable'
+              : 'farmer.prices.quoteError');
+    } finally {
+      if (marketQuoteController.current === controller) {
+        marketQuoteController.current = null;
+        setMarketQuoteLoading(false);
+      }
+    }
+  };
 
   useEffect(() => speechRecognition.subscribe({
     start: () => setRecognizing(true),
@@ -136,7 +180,7 @@ export default function FarmerAddProduceScreen() {
         <View style={styles.field}>
           <Text style={styles.label}>{t('produce.name')} *</Text>
           <View style={styles.nameRow}>
-            <TextInput editable={!saving} value={name} onChangeText={(value) => { setName(value); setFormError(null); submissionId.current = createSubmissionId(); }} placeholder={t('produce.namePlaceholder')} placeholderTextColor={MarketColors.muted} maxLength={120} accessibilityLabel={t('produce.name')} style={[styles.input, styles.nameInput]} />
+          <TextInput editable={!saving} value={name} onChangeText={(value) => { setName(value); resetMarketQuote(); setFormError(null); submissionId.current = createSubmissionId(); }} onEndEditing={() => { if (name.trim()) void showMarketQuote(); }} placeholder={t('produce.namePlaceholder')} placeholderTextColor={MarketColors.muted} maxLength={120} accessibilityLabel={t('produce.name')} style={[styles.input, styles.nameInput]} />
             <Pressable accessibilityRole="button" accessibilityLabel={t(recognizing ? 'produce.stopSpeech' : 'produce.startSpeech')} accessibilityState={{ disabled: saving }} disabled={saving} onPress={() => void toggleSpeech()} style={[styles.voiceButton, recognizing && styles.voiceActive]}>
               <Text style={styles.voiceText}>{recognizing ? '■' : '🎙'}</Text>
             </Pressable>
@@ -149,9 +193,20 @@ export default function FarmerAddProduceScreen() {
           <View style={styles.quantityRow}>
             <TextInput editable={!saving} value={quantity} onChangeText={(value) => { setQuantity(value.replace(/[^\d.]/g, '')); setFormError(null); submissionId.current = createSubmissionId(); }} keyboardType="decimal-pad" inputMode="decimal" accessibilityLabel={t('produce.quantity')} placeholder={t('produce.quantityPlaceholder')} placeholderTextColor={MarketColors.muted} style={[styles.input, styles.quantityInput]} />
             <View style={styles.units}>
-              {(['kg', 'quintal', 'bunch', 'pieces'] as const).map((value) => <Pressable key={value} accessibilityRole="button" disabled={saving} accessibilityState={{ selected: unit === value, disabled: saving }} onPress={() => { setUnit(value); submissionId.current = createSubmissionId(); }} style={[styles.unit, unit === value && styles.unitSelected]}><Text style={[styles.unitText, unit === value && styles.unitTextSelected]}>{t(`produce.unit.${value}` as Parameters<typeof t>[0])}</Text></Pressable>)}
+              {(['kg', 'quintal', 'bunch', 'pieces'] as const).map((value) => <Pressable key={value} accessibilityRole="button" disabled={saving} accessibilityState={{ selected: unit === value, disabled: saving }} onPress={() => { setUnit(value); resetMarketQuote(); submissionId.current = createSubmissionId(); }} style={[styles.unit, unit === value && styles.unitSelected]}><Text style={[styles.unitText, unit === value && styles.unitTextSelected]}>{t(`produce.unit.${value}` as Parameters<typeof t>[0])}</Text></Pressable>)}
             </View>
           </View>
+        </View>
+
+        <View style={styles.marketQuoteBox}>
+          <Text style={styles.label}>{t('farmer.prices.beforePriceTitle')}</Text>
+          <Text style={styles.help}>{t('farmer.prices.beforePriceHelp')}</Text>
+          <Pressable accessibilityRole="button" accessibilityState={{ disabled: marketQuoteLoading || saving || !name.trim() }} disabled={marketQuoteLoading || saving || !name.trim()} onPress={() => void showMarketQuote()} style={[styles.quoteButton, (marketQuoteLoading || saving || !name.trim()) && styles.disabled]}>
+            {marketQuoteLoading ? <ActivityIndicator color={MarketColors.green} /> : <Text style={styles.quoteButtonText}>{marketQuote || marketQuoteError ? t('farmer.prices.retry') : t('farmer.prices.quoteButton')}</Text>}
+          </Pressable>
+          {marketQuoteError ? <Text accessibilityRole="alert" style={styles.error}>{t(marketQuoteError as Parameters<typeof t>[0])}</Text> : null}
+          {marketQuoteLoading ? <Text style={styles.help}>{t('farmer.prices.quoteLoading')}</Text> : null}
+          {marketQuote ? <FarmerMarketResults comparison={marketQuote} t={t} language={language} /> : null}
         </View>
 
         <View style={styles.field}>
@@ -200,5 +255,6 @@ const styles = StyleSheet.create({
   eyebrow: { color: MarketColors.blue, fontSize: 11, fontWeight: '800', letterSpacing: 1 }, title: { color: MarketColors.text, fontSize: 24, fontWeight: '800', marginTop: -9 }, intro: { color: MarketColors.muted, fontSize: 13, lineHeight: 19, marginTop: -9 },
   field: { gap: 7 }, label: { color: MarketColors.text, fontSize: 14, fontWeight: '700' }, input: { minHeight: 48, borderWidth: 1, borderColor: MarketColors.border, borderRadius: 12, backgroundColor: MarketColors.background, paddingHorizontal: 12, color: MarketColors.text, fontSize: 15 }, nameRow: { flexDirection: 'row', gap: 8 }, nameInput: { flex: 1 }, voiceButton: { width: 50, height: 48, borderRadius: 12, backgroundColor: MarketColors.blueSoft, justifyContent: 'center', alignItems: 'center' }, voiceActive: { backgroundColor: '#FDECEC' }, voiceText: { color: MarketColors.blue, fontSize: 19 },
   help: { color: MarketColors.muted, fontSize: 12, lineHeight: 17 }, successText: { color: MarketColors.greenDark, fontSize: 12, fontWeight: '700' }, quantityRow: { gap: 9 }, quantityInput: { width: '100%' }, units: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 }, unit: { minHeight: 38, borderRadius: 10, borderWidth: 1, borderColor: MarketColors.border, paddingHorizontal: 12, justifyContent: 'center' }, unitSelected: { borderColor: MarketColors.green, backgroundColor: MarketColors.greenSoft }, unitText: { color: MarketColors.text, fontSize: 12, fontWeight: '600' }, unitTextSelected: { color: MarketColors.greenDark, fontWeight: '800' }, priceRow: { flexDirection: 'row', alignItems: 'center', gap: 8 }, currencyPrefix: { color: MarketColors.text, fontSize: 17, fontWeight: '800' }, priceInput: { flex: 1 }, priceUnit: { color: MarketColors.greenDark, fontWeight: '800', fontSize: 13 }, estimate: { color: MarketColors.greenDark, fontSize: 13, fontWeight: '700' },
+  marketQuoteBox: { gap: 9, backgroundColor: MarketColors.background, borderRadius: 14, padding: 12 }, quoteButton: { minHeight: 44, borderRadius: 11, borderWidth: 1.3, borderColor: MarketColors.green, alignItems: 'center', justifyContent: 'center' }, quoteButtonText: { color: MarketColors.greenDark, fontWeight: '800' },
   photoHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, photoCount: { color: MarketColors.greenDark, fontWeight: '800' }, captureButton: { minHeight: 48, borderWidth: 1.4, borderColor: MarketColors.green, borderRadius: 12, alignItems: 'center', justifyContent: 'center' }, captureText: { color: MarketColors.green, fontWeight: '800' }, photoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, photoCard: { width: '31%', minWidth: 90, maxWidth: 150, height: 134, borderRadius: 12, backgroundColor: MarketColors.background, overflow: 'hidden' }, photo: { width: '100%', height: 96 }, removePhoto: { position: 'absolute', right: 5, top: 5, width: 27, height: 27, borderRadius: 14, backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center' }, removePhotoText: { color: '#B42318', fontSize: 21, lineHeight: 24, fontWeight: '800' }, retake: { flex: 1, alignItems: 'center', justifyContent: 'center' }, retakeText: { color: MarketColors.greenDark, fontSize: 11, fontWeight: '700' }, error: { color: '#B42318', fontSize: 13, lineHeight: 18 }, saveButton: { minHeight: 50, borderRadius: 13, backgroundColor: MarketColors.green, alignItems: 'center', justifyContent: 'center', marginTop: 3 }, saveText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' }, disabled: { opacity: 0.55 }, listingNote: { marginTop: 20, padding: 14, backgroundColor: MarketColors.greenSoft, borderRadius: 14 },
 });

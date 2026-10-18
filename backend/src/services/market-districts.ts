@@ -7,7 +7,7 @@ export type DistrictReference = {
 
 // Coordinates were retrieved from OpenStreetMap Nominatim on 2026-10-18.
 // Most are district administrative-boundary reference points; the listed city points
-// are verified district headquarters where an OSM district boundary centroid was not returned.
+// are district headquarters when the fallback search needs a recognizable origin.
 export const KARNATAKA_DISTRICT_REFERENCES: DistrictReference[] = [
   { district: 'Bagalkote', latitude: 16.2903648, longitude: 75.5915819, reference: 'boundary-centre' },
   { district: 'Ballari', latitude: 15.3483166, longitude: 76.8054883, reference: 'boundary-centre' },
@@ -20,7 +20,8 @@ export const KARNATAKA_DISTRICT_REFERENCES: DistrictReference[] = [
   { district: 'Chikkaballapura', latitude: 13.5897941, longitude: 77.778793, reference: 'boundary-centre' },
   { district: 'Chikkamagaluru', latitude: 13.4058699, longitude: 75.638758, reference: 'boundary-centre' },
   { district: 'Chitradurga', latitude: 14.3049174, longitude: 76.5296667, reference: 'boundary-centre' },
-  { district: 'Dakshina Kannada', latitude: 12.8226434, longitude: 75.2265036, reference: 'boundary-centre' },
+  // Mangaluru city reference point, used as the default market-search origin.
+  { district: 'Dakshina Kannada', latitude: 12.8698101, longitude: 74.8430082, reference: 'district-headquarters' },
   { district: 'Davanagere', latitude: 14.2558835, longitude: 75.8303421, reference: 'boundary-centre' },
   { district: 'Dharwad', latitude: 15.3707296, longitude: 75.1332867, reference: 'boundary-centre' },
   { district: 'Gadag', latitude: 15.416692, longitude: 75.6815801, reference: 'boundary-centre' },

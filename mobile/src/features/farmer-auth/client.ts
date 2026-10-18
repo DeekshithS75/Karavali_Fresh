@@ -7,7 +7,7 @@ import { appendRegistrationDocument } from './document-upload';
 
 const API_BASE = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 
-type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'exists' | 'documentRequired' | 'invalidDocument' | 'documentMismatch' | 'documentUnreadable' | 'documentFieldsMissing' | 'verificationNotConfigured' | 'verificationProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound' | 'profileNotFound' | 'verificationExpired' | 'configurationIncomplete' | 'privacyNoticeOutdated' | 'validationFailed' | 'producePhotoCount' | 'producePhotoTooLarge' | 'produceImageInvalid' | 'produceStorageUnavailable' | 'producePriceInvalid' | 'produceNotFound' | 'producePriceAlreadySet' | 'marketPriceUnavailable' | 'marketPriceNotConfigured' | 'marketPriceInvalidKey' | 'marketPriceRateLimited';
+type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'exists' | 'documentRequired' | 'invalidDocument' | 'documentMismatch' | 'documentUnreadable' | 'documentFieldsMissing' | 'verificationNotConfigured' | 'verificationProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound' | 'profileNotFound' | 'verificationExpired' | 'configurationIncomplete' | 'privacyNoticeOutdated' | 'validationFailed' | 'producePhotoCount' | 'producePhotoTooLarge' | 'produceImageInvalid' | 'produceStorageUnavailable' | 'producePriceInvalid' | 'produceNotFound' | 'producePriceAlreadySet' | 'marketPriceUnavailable' | 'marketPriceNotConfigured' | 'marketPriceInvalidKey' | 'marketPriceRateLimited' | 'marketCommodityUnrecognized' | 'marketOriginInvalid';
 export type FarmerDocumentField = 'name' | 'age' | 'gender' | 'aadhaar' | 'address' | 'date_of_birth';
 
 const farmerDocumentFields: FarmerDocumentField[] = ['name', 'age', 'gender', 'aadhaar', 'address', 'date_of_birth'];
@@ -71,6 +71,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       if (body.error === 'market_price_provider_not_configured') throw new FarmerAuthError('marketPriceNotConfigured');
       if (body.error === 'market_price_api_key_invalid') throw new FarmerAuthError('marketPriceInvalidKey');
       if (body.error === 'market_price_rate_limited') throw new FarmerAuthError('marketPriceRateLimited');
+      if (body.error === 'market_commodity_unrecognized') throw new FarmerAuthError('marketCommodityUnrecognized');
+      if (body.error === 'market_origin_invalid') throw new FarmerAuthError('marketOriginInvalid');
       if (['market_price_response_invalid', 'market_price_provider_unavailable'].includes(body.error ?? '')) throw new FarmerAuthError('marketPriceUnavailable');
     }
     throw new FarmerAuthError(response.status === 404 || response.status === 503 ? 'unavailable' : response.status === 409 ? 'exists' : 'rejected');
@@ -172,19 +174,51 @@ export type FarmerMarketComparison = {
   status: 'available' | 'stale' | 'missing';
   fetchedAt: string;
   sourceUnit: 'INR/quintal';
+  originDistrict: string;
+  searchStage: 'origin_district' | 'coastal_district' | 'karnataka_wide';
+  freshnessDays: number;
+  selectionComplete: boolean;
+  selectionMethod: 'district_match_only' | 'district_reference_approximation' | 'incomplete';
+  truncated: boolean;
+  distanceAttribution: string;
   source: { name: string; url: string; attribution: string };
   items: {
     state: string; district: string; market: string; commodity: string; variety: string | null; grade: string | null;
     sourceDate: string; stale: boolean; minPrice: number | null; maxPrice: number | null; modalPrice: number | null;
     priceUnit: string | null; sourceUnit: string; unitCompatible: boolean;
+    farmerPrice: number | null; differencePercent: number | null;
+    distanceKm: number | null; distanceMethod: 'same_district' | 'district_reference_approximation' | 'unavailable';
+    fallbackLevel: 'origin_district' | 'coastal_district' | 'other_karnataka';
     askingPriceVsModal: 'below' | 'above' | 'equal' | 'unavailable'; unchangedOnConsecutiveReport: boolean | null;
   }[];
 };
+
+function marketQuery(values: Record<string, string | undefined>) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(values)) if (value !== undefined && value !== '') params.set(key, value);
+  return params.toString();
+}
 
 export async function getFarmerMarketComparison(produceId: string, signal?: AbortSignal): Promise<FarmerMarketComparison> {
   const tokens = await readTokens();
   if (!tokens) throw new FarmerAuthError('unauthorized');
   const result = await request<{ comparison: FarmerMarketComparison }>(`/api/farmer/produce/${encodeURIComponent(produceId)}/market-comparison`, {
+    headers: { Authorization: `Bearer ${tokens.accessToken}` }, signal,
+  });
+  if (!result?.comparison || !Array.isArray(result.comparison.items)) throw new FarmerAuthError('rejected');
+  return result.comparison;
+}
+
+export async function getFarmerMarketQuote(input: {
+  commodity: string; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; unit: FarmerProduce['unit']; askingPrice?: string;
+}, signal?: AbortSignal): Promise<FarmerMarketComparison> {
+  const tokens = await readTokens();
+  if (!tokens) throw new FarmerAuthError('unauthorized');
+  const query = marketQuery({
+    commodity: input.commodity, nameEn: input.nameTranslations?.en, nameKn: input.nameTranslations?.kn,
+    nameTcy: input.nameTranslations?.tcy, unit: input.unit, askingPrice: input.askingPrice,
+  });
+  const result = await request<{ comparison: FarmerMarketComparison }>(`/api/farmer/market-quote?${query}`, {
     headers: { Authorization: `Bearer ${tokens.accessToken}` }, signal,
   });
   if (!result?.comparison || !Array.isArray(result.comparison.items)) throw new FarmerAuthError('rejected');

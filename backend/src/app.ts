@@ -89,6 +89,8 @@ function sendError(response: Response, error: unknown) {
     if (error.code === 'response_invalid') return response.status(502).json({ error: 'market_price_response_invalid' });
     if (error.code === 'invalid_api_key') return response.status(503).json({ error: 'market_price_api_key_invalid' });
     if (error.code === 'rate_limited') return response.status(429).json({ error: 'market_price_rate_limited' });
+    if (error.code === 'commodity_unrecognized') return response.status(422).json({ error: 'market_commodity_unrecognized' });
+    if (error.code === 'origin_invalid') return response.status(400).json({ error: 'market_origin_invalid' });
     return response.status(503).json({ error: 'market_price_provider_unavailable' });
   }
   if (error instanceof multer.MulterError) {
@@ -363,6 +365,56 @@ app.get('/api/farmer/produce', async (request, response) => {
   } catch (error) { return sendError(response, error); }
 });
 
+const marketQuoteQuery = z.object({
+  commodity: z.string().trim().min(1).max(120),
+  nameEn: z.string().trim().max(120).optional(),
+  nameKn: z.string().trim().max(120).optional(),
+  nameTcy: z.string().trim().max(120).optional(),
+  unit: z.enum(['kg', 'quintal', 'bunch', 'pieces']),
+  askingPrice: z.coerce.number().finite().positive().max(1_000_000_000).nullable().optional(),
+});
+
+async function createMarketComparison(produce: FarmerProduceForMarket) {
+  const names = [produce.name, ...Object.values(produce.nameTranslations ?? {})].filter((name): name is string => Boolean(name?.trim()));
+  const dataset = await marketPriceProvider.getRelevantRecords(names);
+  const matching = dataset.records.filter((item) => matchesProduceCommodity(item, names));
+  const previousQueries = matching.map((item) => ({ recordKey: marketRecordKey(item), arrivalDate: previousArrivalDate(item.arrivalDate) }));
+  const previous = previousQueries.length
+    ? await MarketPriceObservationModel.find({ $or: previousQueries }).lean().exec() as unknown as Array<{
+      recordKey: string; arrivalDate: string; state: string; district: string; market: string; commodity: string;
+      variety: string; grade: string; minPrice: number; maxPrice: number; modalPrice: number;
+    }>
+    : [];
+  const previousByKeyAndDate = new Map(previous.map((item) => [
+    `${item.recordKey}|${item.arrivalDate}`,
+    { ...item, arrivalDate: item.arrivalDate } as MarketPriceRecord,
+  ]));
+  if (matching.length) await MarketPriceObservationModel.bulkWrite(matching.map((item) => {
+    const recordKey = marketRecordKey(item);
+    return { updateOne: {
+      filter: { recordKey, arrivalDate: item.arrivalDate },
+      update: { $set: { recordKey, state: item.state, district: item.district, market: item.market, commodity: item.commodity,
+        variety: item.variety, grade: item.grade, arrivalDate: item.arrivalDate, minPrice: item.minPrice, maxPrice: item.maxPrice,
+        modalPrice: item.modalPrice, fetchedAt: new Date(dataset.fetchedAt) } },
+      upsert: true,
+    } };
+  }));
+  return buildFarmerMarketComparison(produce, dataset, previousByKeyAndDate);
+}
+
+app.get('/api/farmer/market-quote', async (request, response) => {
+  try {
+    await findAuthenticatedFarmer(request.header('authorization'));
+    const input = marketQuoteQuery.parse(request.query);
+    const comparison = await createMarketComparison({
+      name: input.commodity,
+      nameTranslations: { en: input.nameEn, kn: input.nameKn, tcy: input.nameTcy },
+      unit: input.unit, pricePerUnit: input.askingPrice ?? null,
+    });
+    return response.json({ comparison });
+  } catch (error) { return sendError(response, error); }
+});
+
 app.get('/api/farmer/produce/:produceId/market-comparison', async (request, response) => {
   try {
     const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
@@ -372,36 +424,9 @@ app.get('/api/farmer/produce/:produceId/market-comparison', async (request, resp
       unit: FarmerProduceForMarket['unit']; pricePerUnit?: number | null;
     } | null;
     if (!record) throw new ApiError(404, 'produce_not_found');
-
-    const names = [record.name, ...Object.values(record.nameTranslations ?? {})].filter((name): name is string => Boolean(name?.trim()));
-    const dataset = await marketPriceProvider.getCoastalRecords(names);
-    const matching = dataset.records.filter((item) => matchesProduceCommodity(item, names));
-    const previousQueries = matching.map((item) => ({ recordKey: marketRecordKey(item), arrivalDate: previousArrivalDate(item.arrivalDate) }));
-    const previous = previousQueries.length
-      ? await MarketPriceObservationModel.find({ $or: previousQueries }).lean().exec() as unknown as Array<{
-        recordKey: string; arrivalDate: string; state: string; district: string; market: string; commodity: string;
-        variety: string; grade: string; minPrice: number; maxPrice: number; modalPrice: number;
-      }>
-      : [];
-    const previousByKeyAndDate = new Map(previous.map((item) => [
-      `${item.recordKey}|${item.arrivalDate}`,
-      { ...item, arrivalDate: item.arrivalDate } as MarketPriceRecord,
-    ]));
-    if (matching.length) await MarketPriceObservationModel.bulkWrite(matching.map((item) => {
-      const recordKey = marketRecordKey(item);
-      return { updateOne: {
-        filter: { recordKey, arrivalDate: item.arrivalDate },
-        update: { $set: { recordKey, state: item.state, district: item.district, market: item.market, commodity: item.commodity,
-          variety: item.variety, grade: item.grade, arrivalDate: item.arrivalDate, minPrice: item.minPrice, maxPrice: item.maxPrice,
-          modalPrice: item.modalPrice, fetchedAt: new Date(dataset.fetchedAt) } },
-        upsert: true,
-      } };
-    }));
-    return response.json({
-      comparison: buildFarmerMarketComparison({
-        name: record.name, nameTranslations: record.nameTranslations, unit: record.unit, pricePerUnit: record.pricePerUnit ?? null,
-      }, dataset.records, dataset.fetchedAt, previousByKeyAndDate),
-    });
+    return response.json({ comparison: await createMarketComparison({
+      name: record.name, nameTranslations: record.nameTranslations, unit: record.unit, pricePerUnit: record.pricePerUnit ?? null,
+    }) });
   } catch (error) { return sendError(response, error); }
 });
 

@@ -13,6 +13,7 @@ import {
 import { useLanguage } from '@/localization/LanguageProvider';
 import { FarmerDashboardGuard } from '@/components/farmer-auth-flow';
 import { FarmerAuthError, getFarmerMarketComparison, getFarmerProduce, getFarmerProfile, getFarmerSessionState, type FarmerMarketComparison, type FarmerProduce, type FarmerProfile } from '@/features/farmer-auth/client';
+import { FarmerMarketResults } from '@/components/farmer-market-results';
 
 type ProfileState = 'loading' | 'loaded' | 'error' | 'missing';
 
@@ -25,7 +26,7 @@ export default function FarmerHomeScreen() {
   const [produce, setProduce] = useState<FarmerProduce[]>([]);
   const [produceState, setProduceState] = useState<ProfileState>('loading');
   const [marketResults, setMarketResults] = useState<Record<string, FarmerMarketComparison | null>>({});
-  const [marketErrors, setMarketErrors] = useState<Record<string, 'unavailable' | 'notConfigured' | 'invalidKey' | 'rateLimited'>>({});
+  const [marketErrors, setMarketErrors] = useState<Record<string, 'unavailable' | 'notConfigured' | 'invalidKey' | 'rateLimited' | 'commodityUnrecognized'>>({});
   const [marketLoadingId, setMarketLoadingId] = useState<string | null>(null);
   const marketController = useRef<AbortController | null>(null);
 
@@ -49,7 +50,8 @@ export default function FarmerHomeScreen() {
       }
       const marketError = error instanceof FarmerAuthError && error.code === 'marketPriceNotConfigured' ? 'notConfigured'
         : error instanceof FarmerAuthError && error.code === 'marketPriceInvalidKey' ? 'invalidKey'
-          : error instanceof FarmerAuthError && error.code === 'marketPriceRateLimited' ? 'rateLimited' : 'unavailable';
+          : error instanceof FarmerAuthError && error.code === 'marketPriceRateLimited' ? 'rateLimited'
+            : error instanceof FarmerAuthError && error.code === 'marketCommodityUnrecognized' ? 'commodityUnrecognized' : 'unavailable';
       setMarketErrors((current) => ({ ...current, [item.id]: marketError }));
     } finally {
       if (marketController.current === controller) {
@@ -58,10 +60,6 @@ export default function FarmerHomeScreen() {
       }
     }
   };
-
-  const formatRupees = (amount: number) => new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', {
-    style: 'currency', currency: 'INR', maximumFractionDigits: 2,
-  }).format(amount);
 
   useEffect(() => {
     let active = true;
@@ -170,25 +168,10 @@ export default function FarmerHomeScreen() {
               <Text style={styles.marketCompareText}>{marketLoadingId === item.id ? t('farmer.prices.comparing') : t('farmer.prices.compare')}</Text>
             </Pressable>
             {marketErrors[item.id] ? <View style={styles.marketResultPanel}>
-              <Text accessibilityRole="alert" style={styles.marketMessage}>{t(marketErrors[item.id] === 'notConfigured' ? 'farmer.prices.notConfigured' : marketErrors[item.id] === 'invalidKey' ? 'farmer.prices.invalidKey' : marketErrors[item.id] === 'rateLimited' ? 'farmer.prices.rateLimited' : 'farmer.prices.providerError')}</Text>
+              <Text accessibilityRole="alert" style={styles.marketMessage}>{t(marketErrors[item.id] === 'notConfigured' ? 'farmer.prices.notConfigured' : marketErrors[item.id] === 'invalidKey' ? 'farmer.prices.invalidKey' : marketErrors[item.id] === 'rateLimited' ? 'farmer.prices.rateLimited' : marketErrors[item.id] === 'commodityUnrecognized' ? 'farmer.prices.unavailableVegetable' : 'farmer.prices.providerError')}</Text>
               <Pressable accessibilityRole="button" disabled={Boolean(marketLoadingId)} onPress={() => void compareMarketPrice(item)} style={styles.profileRetry}><Text style={styles.profileRetryText}>{t('farmer.prices.retry')}</Text></Pressable>
             </View> : null}
-            {marketResults[item.id] ? <View style={styles.marketResultPanel}>
-              {marketResults[item.id]!.status === 'missing' ? <Text style={styles.marketMessage}>{t('farmer.prices.missing')}</Text> : null}
-              {marketResults[item.id]!.status === 'stale' ? <Text style={styles.marketMessage}>{t('farmer.prices.stale')}</Text> : null}
-              {marketResults[item.id]!.items.map((market, index) => <View key={`${market.district}-${market.market}-${market.commodity}-${market.variety ?? ''}-${market.grade ?? ''}-${market.sourceDate}-${index}`} style={styles.marketRow}>
-                <Text style={styles.marketName}>{market.market} · {market.district}</Text>
-                <Text style={styles.marketMessage}>{market.commodity}{market.variety ? ` · ${market.variety}` : ''}{market.grade ? ` · ${market.grade}` : ''}</Text>
-                {market.stale ? <Text style={styles.marketMessage}>{t('farmer.prices.stale')}</Text> : null}
-                {market.unitCompatible && market.minPrice !== null && market.maxPrice !== null ? <Text style={styles.marketMessage}>{t('farmer.prices.range').replace('{min}', formatRupees(market.minPrice)).replace('{max}', formatRupees(market.maxPrice))} / {t(`produce.priceUnit.${item.unit}` as Parameters<typeof t>[0])}</Text> : <Text style={styles.marketMessage}>{t('farmer.prices.unitIncompatible')}</Text>}
-                {market.unitCompatible && market.modalPrice !== null ? <Text style={styles.marketMessage}>{t('farmer.prices.modal').replace('{price}', formatRupees(market.modalPrice))} / {t(`produce.priceUnit.${item.unit}` as Parameters<typeof t>[0])}</Text> : null}
-                <Text style={styles.marketMessage}>{t('farmer.prices.observationDate').replace('{date}', market.sourceDate)}</Text>
-                <Text style={styles.marketMessage}>{t(market.askingPriceVsModal === 'below' ? 'farmer.prices.askingBelow' : market.askingPriceVsModal === 'above' ? 'farmer.prices.askingAbove' : market.askingPriceVsModal === 'equal' ? 'farmer.prices.askingEqual' : 'farmer.prices.askingUnavailable')}</Text>
-                <Text style={styles.marketMessage}>{t(market.unchangedOnConsecutiveReport === true ? 'farmer.prices.unchanged' : market.unchangedOnConsecutiveReport === false ? 'farmer.prices.changed' : 'farmer.prices.historyUnavailable')}</Text>
-              </View>)}
-              <Text style={styles.marketMessage}>{t('farmer.prices.fetchedAt').replace('{date}', new Intl.DateTimeFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(marketResults[item.id]!.fetchedAt)))}</Text>
-              <Text style={styles.marketAttribution}>{t('farmer.prices.attribution')}</Text>
-            </View> : null}
+            {marketResults[item.id] ? <FarmerMarketResults comparison={marketResults[item.id]!} t={t} language={language} /> : null}
           </View>
         </View>)}</View>}
       </View>
@@ -205,13 +188,9 @@ export default function FarmerHomeScreen() {
 
       <View style={styles.section}>
         <SectionHeading title={t('farmer.prices.title')} detail={t('farmer.prices.detail')} />
-        <EmptyState
-          icon="📊"
-          title={t('farmer.prices.emptyTitle')}
-          message={t('farmer.prices.emptyMessage')}
-          tone="blue"
-        />
+        <EmptyState icon="📊" title={t('farmer.prices.emptyTitle')} message={t('farmer.prices.emptyMessage')} tone="blue" />
       </View>
+
     </ScreenFrame>
     </FarmerDashboardGuard>
   );

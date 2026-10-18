@@ -17,6 +17,7 @@ const ownerId = 'fictional-owner-id';
 const otherId = 'fictional-other-owner-id';
 const token = 'fictional-market-session-token-123456789012345678';
 const produceId = '65eecb934100000000000001';
+const today = '2026-10-18';
 const fictionalRow = (overrides: Record<string, unknown> = {}) => ({
   state: 'Karnataka', district: 'Udupi', market: 'Fictional Local Mandi', commodity: 'Tomato',
   variety: 'Fictional Round', grade: 'Fictional A', arrival_date: '18/10/2026',
@@ -27,129 +28,193 @@ const parsedRecord = (row = fictionalRow()) => {
   assert.ok(record);
   return record;
 };
+const dataset = (records: ReturnType<typeof parsedRecord>[], overrides: Record<string, unknown> = {}) => ({
+  records, fetchedAt: `${today}T12:00:00.000Z`, truncated: false, stage: 'origin_district' as const,
+  originDistrict: 'Udupi', commodity: 'Tomato', freshnessDays: 7, ...overrides,
+});
 
-test('parses official API record fields and normalizes the source observation date', () => {
+test('parses official API field names and normalizes the source date', () => {
   const parsed = provider.parseDataGovResponse({ total: 1, count: 1, limit: 20, offset: 0, records: [fictionalRow()] });
-  assert.equal(parsed.records[0]?.arrivalDate, '2026-10-18');
+  assert.equal(parsed.records[0]?.arrivalDate, today);
   assert.equal(parsed.records[0]?.modalPrice, 2500);
   assert.equal(parsed.records[0]?.commodity, 'Tomato');
 });
 
-test('rejects an incompatible API shape instead of returning fabricated records', () => {
+test('rejects invalid upstream shapes and records', () => {
   assert.throws(() => provider.parseDataGovResponse({ total: 1, count: 1, limit: 20, offset: 0, data: [fictionalRow()] }), /response_invalid/);
   assert.throws(() => provider.parseDataGovResponse({ total: 1, count: 1, limit: 20, offset: 0, records: [{ title: 'Tomato', price: 30 }] }), /response_invalid/);
 });
 
-test('requests only Karnataka, one district, and the exact commodity with a bounded page size', async () => {
+test('sends only bounded Karnataka, district, and exact commodity filters', async () => {
   const requested: URL[] = [];
-  const result = await provider.requestDataGovPage(0, 'Udupi', 'Tomato', 'fictional-data-gov-key', async (input) => {
+  await provider.requestDataGovPage(0, 'Udupi', 'Tomato', 'fictional-data-gov-key', async (input) => {
     requested.push(new URL(String(input)));
-    return Response.json({ total: 1, count: 1, limit: 20, offset: 0, records: [fictionalRow()] });
+    return Response.json({ total: 0, count: 0, limit: 20, offset: 0, records: [] });
   });
   assert.equal(requested[0]?.pathname, `/resource/${provider.DATA_GOV_MANDI_RESOURCE_ID}`);
-  assert.equal(requested[0]?.searchParams.get('api-key'), 'fictional-data-gov-key');
   assert.equal(requested[0]?.searchParams.get('format'), 'json');
   assert.equal(requested[0]?.searchParams.get('limit'), '20');
   assert.equal(requested[0]?.searchParams.get('offset'), '0');
   assert.equal(requested[0]?.searchParams.get('filters[state]'), 'Karnataka');
   assert.equal(requested[0]?.searchParams.get('filters[district]'), 'Udupi');
   assert.equal(requested[0]?.searchParams.get('filters[commodity]'), 'Tomato');
-  assert.equal(result.records.length, 1);
 });
 
-test('paginates only while the filtered API total requires another page and caches each query', async () => {
+test('falls through absent local and coastal rows to bounded Karnataka-wide exact-commodity results', async () => {
   provider.marketPriceProvider.clearCache();
   const requested: URL[] = [];
   const fetchMock: typeof fetch = async (input) => {
     const url = new URL(String(input)); requested.push(url);
     const district = url.searchParams.get('filters[district]');
-    if (district === 'Dakshina Kannada') return Response.json({ total: 0, count: 0, limit: 20, offset: Number(url.searchParams.get('offset')), records: [] });
     const offset = Number(url.searchParams.get('offset'));
-    const records = offset === 0 ? Array.from({ length: 20 }, (_, index) => fictionalRow({ market: `Fictional Market ${index}`, arrival_date: '18/10/2026' })) : [fictionalRow({ market: 'Fictional Last Market' })];
-    return Response.json({ total: 21, count: records.length, limit: 20, offset, records });
+    if (district) return Response.json({ total: 0, count: 0, limit: 20, offset, records: [] });
+    return Response.json({ total: 1, count: 1, limit: 20, offset, records: [fictionalRow({ district: 'Bengaluru South', market: 'Ramanagara APMC' })] });
   };
-  const first = await provider.getRelevantRecords(['Tomato'], 'fictional-key', fetchMock);
-  assert.equal(first.records.length, 21);
-  assert.equal(requested.length, 3);
-  assert.deepEqual(requested.map((url) => [url.searchParams.get('filters[state]'), url.searchParams.get('filters[district]'), url.searchParams.get('filters[commodity]'), url.searchParams.get('offset')]), [
-    ['Karnataka', 'Dakshina Kannada', 'Tomato', '0'],
-    ['Karnataka', 'Udupi', 'Tomato', '0'],
-    ['Karnataka', 'Udupi', 'Tomato', '20'],
-  ]);
-  await provider.getRelevantRecords(['Tomato'], 'fictional-key', fetchMock);
-  assert.equal(requested.length, 3);
+  const result = await provider.getRelevantRecords(['Tomato'], 'Dakshina Kannada', 'fictional-key', fetchMock, true, today);
+  assert.equal(result.stage, 'karnataka_wide');
+  assert.equal(result.records[0]?.district, 'Bengaluru South');
+  assert.equal(result.records[0]?.market, 'Ramanagara APMC');
+  assert.ok(requested.some((url) => url.searchParams.get('filters[district]') === 'Dakshina Kannada'));
+  assert.ok(requested.some((url) => url.searchParams.get('filters[district]') === 'Udupi'));
+  assert.ok(requested.some((url) => url.searchParams.get('filters[district') === null));
+  assert.ok(requested.every((url) => url.searchParams.get('filters[state]') === 'Karnataka' && url.searchParams.get('filters[commodity]') === 'Tomato'));
   provider.marketPriceProvider.clearCache();
 });
 
-test('coastal filtering keeps only Karnataka coastal-district records present in the response', () => {
-  const records = [
-    parsedRecord(fictionalRow({ district: 'Dakshina Kannada', market: 'Mangalore Sample APMC' })),
-    parsedRecord(fictionalRow({ district: 'Udupi', market: 'Udupi Sample APMC' })),
-    parsedRecord(fictionalRow({ district: 'Uttara Kannada', market: 'Karwar Sample APMC' })),
-    parsedRecord(fictionalRow({ district: 'Mysuru', market: 'Mysuru Sample APMC' })),
-    parsedRecord(fictionalRow({ state: 'Kerala', district: 'Udupi', market: 'Wrong State Sample' })),
-  ];
-  assert.deepEqual(records.filter(provider.isCoastalKarnatakaRecord).map(({ market }) => market), [
-    'Mangalore Sample APMC', 'Udupi Sample APMC',
-  ]);
+test('uses cache for repeated exact filters and paginates only when source total requires it', async () => {
+  provider.marketPriceProvider.clearCache();
+  const requested: URL[] = [];
+  const fetchMock: typeof fetch = async (input) => {
+    const url = new URL(String(input)); requested.push(url);
+    const offset = Number(url.searchParams.get('offset'));
+    const records = offset === 0 ? Array.from({ length: 20 }, (_, index) => fictionalRow({ market: `Fictional ${index}` })) : [fictionalRow({ market: 'Fictional final row' })];
+    return Response.json({ total: 21, count: records.length, limit: 20, offset, records });
+  };
+  const result = await provider.getRelevantRecords(['Tomato'], 'Udupi', 'fictional-key', fetchMock, true, today);
+  assert.equal(result.records.length, 21);
+  assert.equal(requested.filter((url) => url.searchParams.get('filters[district]') === 'Udupi').length, 2);
+  await provider.getRelevantRecords(['Tomato'], 'Udupi', 'fictional-key', fetchMock, false, today);
+  assert.equal(requested.filter((url) => url.searchParams.get('filters[district]') === 'Udupi').length, 2);
+  provider.marketPriceProvider.clearCache();
 });
 
-test('commodity comparison is exact after Unicode and punctuation normalization, not substring fuzzy matching', () => {
-  assert.equal(provider.matchesProduceCommodity(parsedRecord(fictionalRow({ commodity: 'Tomato' })), ['Tomatoes']), false);
-  assert.equal(provider.matchesProduceCommodity(parsedRecord(fictionalRow({ commodity: 'Tomato' })), ['टमाटर', 'Tomato']), true);
+test('a recent selected-district report takes priority without querying other districts', async () => {
+  provider.marketPriceProvider.clearCache();
+  const requested: URL[] = [];
+  const result = await provider.getRelevantRecords(['Tomato'], 'Udupi', 'fictional-key', async (input) => {
+    requested.push(new URL(String(input)));
+    return Response.json({ total: 1, count: 1, limit: 20, offset: 0, records: [fictionalRow()] });
+  }, true, today);
+  assert.equal(result.stage, 'origin_district');
+  assert.equal(result.records[0]?.district, 'Udupi');
+  assert.equal(requested.length, 1);
+  provider.marketPriceProvider.clearCache();
+});
+
+test('a nearby coastal report is used when the selected district has no recent row', async () => {
+  provider.marketPriceProvider.clearCache();
+  const requested: URL[] = [];
+  const result = await provider.getRelevantRecords(['Tomato'], 'Dakshina Kannada', 'fictional-key', async (input) => {
+    const url = new URL(String(input)); requested.push(url);
+    const district = url.searchParams.get('filters[district]');
+    const offset = Number(url.searchParams.get('offset'));
+    if (district === 'Udupi') return Response.json({ total: 1, count: 1, limit: 20, offset, records: [fictionalRow()] });
+    return Response.json({ total: 0, count: 0, limit: 20, offset, records: [] });
+  }, true, today);
+  assert.equal(result.stage, 'coastal_district');
+  assert.equal(result.records[0]?.district, 'Udupi');
+  assert.ok(requested.some((url) => url.searchParams.get('filters[district]') === 'Dakshina Kannada'));
+  assert.ok(requested.some((url) => url.searchParams.get('filters[district]') === 'Udupi'));
+  provider.marketPriceProvider.clearCache();
+});
+
+test('commodity matching uses exact reviewed aliases, not substring matching', () => {
+  assert.equal(provider.matchesProduceCommodity(parsedRecord(), ['Tomato']), true);
   assert.equal(provider.matchesProduceCommodity(parsedRecord(fictionalRow({ commodity: 'Cherry Tomato' })), ['Tomato']), false);
+  assert.equal(provider.matchesProduceCommodity(parsedRecord(fictionalRow({ commodity: 'Brinjal' })), ['Eggplant']), true);
+  assert.deepEqual([
+    provider.resolveOfficialCommodity(['ಟೊಮೇಟೊ']),
+    provider.resolveOfficialCommodity(['ಬದನೆಕಾಯಿ']),
+    provider.resolveOfficialCommodity(['ಬೆಂಡೆಕಾಯಿ']),
+    provider.resolveOfficialCommodity(['ಹೀರೆಕಾಯಿ']),
+    provider.resolveOfficialCommodity(['ಹಸಿಮೆಣಸಿನಕಾಯಿ']),
+  ], ['Tomato', 'Brinjal', 'Ladies Finger', 'Ridgeguard(Tori)', 'Green Chilli']);
+  assert.equal(provider.resolveOfficialCommodity(['Tomato', 'ಬದನೆಕಾಯಿ']), null);
+  assert.equal(provider.resolveOfficialCommodity(['Unknown fictional crop']), null);
+  assert.equal(provider.matchesProduceCommodity(parsedRecord(fictionalRow({ commodity: 'Ginger(Green)' })), ['ಹಸಿಮೆಣಸಿನಕಾಯಿ']), false);
+  assert.equal(provider.parseDataGovRecord(fictionalRow({ min_price: '-4' })), null);
+  assert.equal(provider.parseDataGovRecord(fictionalRow({ modal_price: '9000' })), null);
 });
 
-test('converts quintal to kilogram only; bunch and piece units remain incompatible', () => {
+test('uses district reference points to sort and label approximate fallback distance', () => {
+  const records = [
+    parsedRecord(fictionalRow({ district: 'Mysuru', market: 'Farther Example' })),
+    parsedRecord(fictionalRow({ district: 'Dakshina Kannada', market: 'Coastal Example' })),
+  ];
+  const result = comparison.buildFarmerMarketComparison({ name: 'Tomato', unit: 'kg', pricePerUnit: null }, dataset(records, { stage: 'karnataka_wide' }), new Map(), new Date(`${today}T12:00:00.000Z`));
+  assert.equal(result.items[0]?.market, 'Coastal Example');
+  assert.equal(result.items[0]?.fallbackLevel, 'coastal_district');
+  assert.equal(result.items[0]?.distanceMethod, 'district_reference_approximation');
+  assert.equal(result.items[1]?.distanceMethod, 'district_reference_approximation');
+  assert.ok((result.items[1]?.distanceKm ?? 0) > 0);
+});
+
+test('marks distance selection incomplete when a returned district lacks a verified reference point', () => {
+  const unknown = parsedRecord(fictionalRow({ district: 'Fictional District Without a Map Reference' }));
+  const result = comparison.buildFarmerMarketComparison({ name: 'Tomato', unit: 'kg', pricePerUnit: null }, dataset([unknown], { stage: 'karnataka_wide' }), new Map(), new Date(`${today}T12:00:00.000Z`));
+  assert.equal(result.selectionComplete, false);
+  assert.equal(result.items[0]?.distanceMethod, 'unavailable');
+});
+
+test('reports capped pagination as truncated', async () => {
+  provider.marketPriceProvider.clearCache();
+  const result = await provider.getRelevantRecords(['Tomato'], 'Udupi', 'fictional-key', async (input) => {
+    const offset = Number(new URL(String(input)).searchParams.get('offset'));
+    const records = Array.from({ length: 20 }, (_, index) => fictionalRow({ market: `Fictional market ${offset + index}` }));
+    return Response.json({ total: 101, count: 20, limit: 20, offset, records });
+  }, true, today);
+  assert.equal(result.records.length, 100);
+  assert.equal(result.truncated, true);
+  provider.marketPriceProvider.clearCache();
+});
+
+test('converts quintal source prices to kg only and leaves piece-based units incomparable', () => {
   assert.equal(comparison.convertSourceQuintalPrice(2500, 'kg'), 25);
   assert.equal(comparison.convertSourceQuintalPrice(2500, 'quintal'), 2500);
   assert.equal(comparison.convertSourceQuintalPrice(2500, 'bunch'), null);
   assert.equal(comparison.convertSourceQuintalPrice(2500, 'pieces'), null);
 });
 
-test('reports missing data, marks old observations stale, and never treats a missing report as stable', () => {
-  const now = new Date('2026-10-18T12:00:00.000Z');
-  const produce = { name: 'Tomato', unit: 'kg' as const, pricePerUnit: 30 };
-  assert.equal(comparison.buildFarmerMarketComparison(produce, [], now.toISOString(), new Map(), now).status, 'missing');
+test('marks stale or missing observations explicitly and does not imply unchanged prices without a prior daily report', () => {
+  const now = new Date(`${today}T12:00:00.000Z`);
+  assert.equal(comparison.buildFarmerMarketComparison({ name: 'Tomato', unit: 'kg', pricePerUnit: 30 }, dataset([]), new Map(), now).status, 'missing');
   const stale = parsedRecord(fictionalRow({ arrival_date: '01/10/2026' }));
-  const result = comparison.buildFarmerMarketComparison(produce, [stale], now.toISOString(), new Map(), now);
+  const result = comparison.buildFarmerMarketComparison({ name: 'Tomato', unit: 'kg', pricePerUnit: 30 }, dataset([stale]), new Map(), now);
   assert.equal(result.status, 'stale');
   assert.equal(result.items[0]?.stale, true);
   assert.equal(result.items[0]?.unchangedOnConsecutiveReport, null);
 });
 
-test('reports stable prices only for matching consecutive daily observations', () => {
+test('does not report stable prices when yesterday had no observation', () => {
   const current = parsedRecord();
-  const prior = { ...current, arrivalDate: '2026-10-17' };
-  const key = provider.marketRecordKey(current);
-  const result = comparison.buildFarmerMarketComparison(
-    { name: 'Tomato', unit: 'kg', pricePerUnit: 30 }, [current], '2026-10-18T12:00:00.000Z',
-    new Map([[`${key}|2026-10-17`, prior]]), new Date('2026-10-18T12:00:00.000Z'),
-  );
-  assert.equal(result.items[0]?.unchangedOnConsecutiveReport, true);
-  const changed = comparison.buildFarmerMarketComparison(
-    { name: 'Tomato', unit: 'kg', pricePerUnit: 30 }, [current], '2026-10-18T12:00:00.000Z',
-    new Map([[`${key}|2026-10-16`, { ...prior, arrivalDate: '2026-10-16' }]]), new Date('2026-10-18T12:00:00.000Z'),
-  );
-  assert.equal(changed.items[0]?.unchangedOnConsecutiveReport, null);
+  const result = comparison.buildFarmerMarketComparison({ name: 'Tomato', unit: 'kg', pricePerUnit: 30 }, dataset([current]), new Map(), new Date(`${today}T12:00:00.000Z`));
+  assert.equal(result.items[0]?.unchangedOnConsecutiveReport, null);
 });
 
-test('handles upstream HTTP and network failures without producing sample prices', async () => {
+test('handles upstream HTTP and network failures without inventing values', async () => {
   await assert.rejects(provider.requestDataGovPage(0, 'Udupi', 'Tomato', 'fictional-key', async () => new Response('', { status: 503 })), /unavailable/);
   await assert.rejects(provider.requestDataGovPage(0, 'Udupi', 'Tomato', 'fictional-key', async () => new Response('', { status: 403 })), /invalid_api_key/);
   await assert.rejects(provider.requestDataGovPage(0, 'Udupi', 'Tomato', 'fictional-key', async () => new Response('', { status: 429 })), /rate_limited/);
   await assert.rejects(provider.requestDataGovPage(0, 'Udupi', 'Tomato', 'fictional-key', async () => { throw new Error('network down'); }), /unavailable/);
 });
 
-async function withServer(context: TestContext) {
+async function withServer(context: TestContext, route = `/api/farmer/produce/${produceId}/market-comparison`) {
   const server = createServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   context.after(async () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
   const address = server.address();
   assert.ok(address && typeof address === 'object');
-  return (authorization = `Bearer ${token}`) => fetch(`http://127.0.0.1:${address.port}/api/farmer/produce/${produceId}/market-comparison`, {
-    headers: authorization ? { Authorization: authorization } : {},
-  });
+  return (authorization = `Bearer ${token}`, path = route) => fetch(`http://127.0.0.1:${address.port}${path}`, { headers: authorization ? { Authorization: authorization } : {} });
 }
 
 function authenticateAsOwner(context: TestContext) {
@@ -162,20 +227,19 @@ function authenticateAsOwner(context: TestContext) {
   }) as never);
 }
 
-test('protected market comparison requires an authenticated Farmer session', async (context) => {
+test('protected market comparison requires a valid Farmer session', async (context) => {
   const get = await withServer(context);
-  const response = await get('');
-  assert.equal(response.status, 401);
+  assert.equal((await get('')).status, 401);
 });
 
-test('market comparison queries only the produce owned by the authenticated Farmer', async (context) => {
+test('a Farmer can compare only their own produce listing', async (context) => {
   authenticateAsOwner(context);
   context.mock.method(models.ProduceModel, 'findOne', (query: unknown) => {
     assert.equal(String((query as { farmerId: unknown }).farmerId), ownerId);
     assert.equal(String((query as { _id: unknown })._id), produceId);
     return { lean: () => ({ exec: async () => ({ _id: produceId, name: 'Fictional Herb', unit: 'bunch', pricePerUnit: 40 }) }) } as never;
   });
-  context.mock.method(provider.marketPriceProvider, 'getCoastalRecords', async () => ({ records: [], fetchedAt: '2026-10-18T12:00:00.000Z' }));
+  context.mock.method(provider.marketPriceProvider, 'getRelevantRecords', async () => dataset([]));
   const get = await withServer(context);
   const response = await get();
   assert.equal(response.status, 200);
@@ -184,51 +248,42 @@ test('market comparison queries only the produce owned by the authenticated Farm
   assert.deepEqual(body.comparison.items, []);
 });
 
-test('returns converted unit prices and persists the source observation history', async (context) => {
+test('market quote endpoint is protected and returns the source rows before an asking price exists', async (context) => {
   authenticateAsOwner(context);
-  context.mock.method(models.ProduceModel, 'findOne', () => ({ lean: () => ({ exec: async () => ({
-    _id: produceId, name: 'Tomato', nameTranslations: { kn: 'Tomato' }, unit: 'kg', pricePerUnit: 30,
-  }) }) }) as never);
-  context.mock.method(provider.marketPriceProvider, 'getCoastalRecords', async () => ({
-    records: [parsedRecord()], fetchedAt: '2026-10-18T12:00:00.000Z',
-  }));
-  context.mock.method(models.MarketPriceObservationModel, 'find', (query: unknown) => {
-    assert.ok(Array.isArray((query as { $or: unknown[] }).$or));
-    return { lean: () => ({ exec: async () => [] }) } as never;
+  context.mock.method(models.MarketPriceObservationModel, 'find', () => ({ lean: () => ({ exec: async () => [] }) }) as never);
+  context.mock.method(models.MarketPriceObservationModel, 'bulkWrite', async () => ({ acknowledged: true }) as never);
+  context.mock.method(provider.marketPriceProvider, 'getRelevantRecords', async (names: string[]) => {
+    assert.deepEqual(names, ['Tomato', 'ಟೊಮೇಟೊ']);
+    return dataset([parsedRecord()]);
   });
-  context.mock.method(models.MarketPriceObservationModel, 'bulkWrite', async (operations: Array<{ updateOne: { filter: { recordKey: string; arrivalDate: string }; update: { $set: { modalPrice: number } }; upsert: boolean } }>) => {
-    assert.equal(operations.length, 1);
-    assert.equal(operations[0]?.updateOne.upsert, true);
-    assert.equal(operations[0]?.updateOne.filter.arrivalDate, '2026-10-18');
-    assert.equal(operations[0]?.updateOne.update.$set.modalPrice, 2500);
-    return { acknowledged: true } as never;
-  });
-  const get = await withServer(context);
+  const path = '/api/farmer/market-quote?commodity=Tomato&nameKn=ಟೊಮೇಟೊ&unit=kg';
+  const get = await withServer(context, path);
+  assert.equal((await get('')).status, 401);
   const response = await get();
   assert.equal(response.status, 200);
-  const body = await response.json() as { comparison: { status: string; fetchedAt: string; items: Array<{ market: string; minPrice: number; maxPrice: number; modalPrice: number; priceUnit: string; sourceDate: string; askingPriceVsModal: string }> } };
-  assert.equal(body.comparison.status, 'available');
-  assert.equal(body.comparison.fetchedAt, '2026-10-18T12:00:00.000Z');
+  const body = await response.json() as { comparison: { items: Array<{ market: string; modalPrice: number; sourceDate: string; farmerPrice: number | null }> } };
   assert.equal(body.comparison.items[0]?.market, 'Fictional Local Mandi');
-  assert.equal(body.comparison.items[0]?.minPrice, 22);
-  assert.equal(body.comparison.items[0]?.maxPrice, 28);
   assert.equal(body.comparison.items[0]?.modalPrice, 25);
-  assert.equal(body.comparison.items[0]?.priceUnit, 'INR/kg');
-  assert.equal(body.comparison.items[0]?.sourceDate, '2026-10-18');
-  assert.equal(body.comparison.items[0]?.askingPriceVsModal, 'above');
+  assert.equal(body.comparison.items[0]?.sourceDate, today);
+  assert.equal(body.comparison.items[0]?.farmerPrice, null);
 });
 
-test('a different Farmer cannot compare another Farmer listing', async (context) => {
+test('market quote reports a missing API key as explicit provider configuration failure', async (context) => {
   authenticateAsOwner(context);
-  let providerCalled = false;
+  context.mock.method(provider.marketPriceProvider, 'getRelevantRecords', async () => { throw new provider.MarketPriceProviderError('not_configured'); });
+  const get = await withServer(context, '/api/farmer/market-quote?commodity=Tomato&unit=kg');
+  const response = await get();
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'market_price_provider_not_configured' });
+});
+
+test('another Farmer cannot retrieve a different Farmer listing', async (context) => {
+  authenticateAsOwner(context);
   context.mock.method(models.ProduceModel, 'findOne', (query: unknown) => {
     assert.equal(String((query as { farmerId: unknown }).farmerId), ownerId);
     assert.notEqual(String((query as { farmerId: unknown }).farmerId), otherId);
     return { lean: () => ({ exec: async () => null }) } as never;
   });
-  context.mock.method(provider.marketPriceProvider, 'getCoastalRecords', async () => { providerCalled = true; return { records: [], fetchedAt: new Date().toISOString() }; });
   const get = await withServer(context);
-  const response = await get();
-  assert.equal(response.status, 404);
-  assert.equal(providerCalled, false);
+  assert.equal((await get()).status, 404);
 });
