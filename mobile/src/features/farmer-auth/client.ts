@@ -7,9 +7,13 @@ import { appendRegistrationDocument } from './document-upload';
 
 const API_BASE = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 
-type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'exists' | 'documentRequired' | 'invalidDocument' | 'documentMismatch' | 'documentUnreadable' | 'documentFieldsMissing' | 'verificationNotConfigured' | 'verificationProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound' | 'verificationExpired' | 'configurationIncomplete' | 'privacyNoticeOutdated' | 'validationFailed';
+type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'exists' | 'documentRequired' | 'invalidDocument' | 'documentMismatch' | 'documentUnreadable' | 'documentFieldsMissing' | 'verificationNotConfigured' | 'verificationProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound' | 'profileNotFound' | 'verificationExpired' | 'configurationIncomplete' | 'privacyNoticeOutdated' | 'validationFailed';
+export type FarmerDocumentField = 'name' | 'age' | 'gender' | 'aadhaar' | 'address' | 'date_of_birth';
+
+const farmerDocumentFields: FarmerDocumentField[] = ['name', 'age', 'gender', 'aadhaar', 'address', 'date_of_birth'];
+
 export class FarmerAuthError extends Error {
-  constructor(readonly code: ApiErrorCode) { super(code); }
+  constructor(readonly code: ApiErrorCode, readonly fields: FarmerDocumentField[] = [], readonly suggestedFullName: string | null = null) { super(code); }
 }
 
 function apiUrl(path: string) {
@@ -35,10 +39,17 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   if (!response.ok) {
     if (response.status === 401) throw new FarmerAuthError('unauthorized');
-    const body = await response.json().catch(() => ({})) as { error?: string; issues?: string[]; missingFields?: string[] };
+    const body = await response.json().catch(() => ({})) as { error?: string; issues?: string[]; fields?: string[]; missingFields?: string[]; suggestedFullName?: string };
     if ([400, 404, 409, 422, 429, 503].includes(response.status)) {
-      if (body.error === 'document_mismatch') throw new FarmerAuthError('documentMismatch');
-      if (body.error === 'document_unreadable') throw new FarmerAuthError(body.issues?.includes('required_fields_missing') || Boolean(body.missingFields?.length) ? 'documentFieldsMissing' : 'documentUnreadable');
+      const mismatchedFields = body.fields?.filter((field): field is FarmerDocumentField => farmerDocumentFields.includes(field as FarmerDocumentField)) ?? [];
+      const missingFields = body.missingFields?.filter((field): field is FarmerDocumentField => farmerDocumentFields.includes(field as FarmerDocumentField)) ?? [];
+      if (body.error === 'document_mismatch') {
+        const suggestedFullName = mismatchedFields.includes('name') && typeof body.suggestedFullName === 'string'
+          ? body.suggestedFullName.trim().slice(0, 120) || null
+          : null;
+        throw new FarmerAuthError('documentMismatch', mismatchedFields, suggestedFullName);
+      }
+      if (body.error === 'document_unreadable') throw new FarmerAuthError(body.issues?.includes('required_fields_missing') || missingFields.length ? 'documentFieldsMissing' : 'documentUnreadable', missingFields);
       if (body.error === 'document_required') throw new FarmerAuthError('documentRequired');
       if (body.error === 'invalid_document') throw new FarmerAuthError('invalidDocument');
       if (body.error === 'phone_verification_provider_not_configured') throw new FarmerAuthError('verificationNotConfigured');
@@ -46,7 +57,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       if (body.error === 'verification_expired') throw new FarmerAuthError('verificationExpired');
       if (body.error === 'rate_limit_exceeded' || body.error === 'verification_resend_too_soon') throw new FarmerAuthError('rateLimited');
       if (body.error === 'ocr_engine_not_configured') throw new FarmerAuthError('ocrUnavailable');
-      if (body.error === 'farmer_not_found') throw new FarmerAuthError('farmerNotFound');
+      if (body.error === 'farmer_not_found') throw new FarmerAuthError(path === '/api/farmer/profile' ? 'profileNotFound' : 'farmerNotFound');
       if (body.error === 'registration_encryption_not_configured' || body.error === 'session_signing_not_configured') throw new FarmerAuthError('configurationIncomplete');
       if (body.error === 'privacy_notice_version_mismatch') throw new FarmerAuthError('privacyNoticeOutdated');
       if (body.error === 'validation_failed') throw new FarmerAuthError('validationFailed');
@@ -116,6 +127,21 @@ export async function getFarmerSessionState(): Promise<FarmerSessionState> {
 
 export async function hasValidFarmerSession(): Promise<boolean> {
   return (await getFarmerSessionState()) === 'valid';
+}
+
+export type FarmerProfile = { fullName: string };
+
+export async function getFarmerProfile(signal?: AbortSignal): Promise<FarmerProfile> {
+  const tokens = await readTokens();
+  if (!tokens) throw new FarmerAuthError('unauthorized');
+  const result = await request<{ profile: FarmerProfile }>('/api/farmer/profile', {
+    headers: { Authorization: `Bearer ${tokens.accessToken}` },
+    signal,
+  });
+  if (!result?.profile || typeof result.profile.fullName !== 'string' || !result.profile.fullName.trim()) {
+    throw new FarmerAuthError('rejected');
+  }
+  return { fullName: result.profile.fullName };
 }
 
 export async function submitFarmerRegistration(data: FarmerRegistration, imageUri: string, imageType: string, privacyNoticeVersion: string) {

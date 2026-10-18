@@ -23,6 +23,7 @@ import {
   startFarmerRegistrationPhoneVerification,
   submitFarmerRegistration,
   type FarmerCapabilities,
+  type FarmerDocumentField,
   type FarmerRegistration,
 } from '@/features/farmer-auth/client';
 import { routeForFarmerAccount, routeForFarmerSession, type FarmerSessionState } from '@/features/farmer-auth/session-lifecycle';
@@ -31,6 +32,15 @@ import { farmerAuthRuntime } from '@/features/farmer-auth/runtime';
 type Page = 'entry' | 'register' | 'login' | 'otp' | 'verification';
 type FormErrors = Partial<Record<keyof FarmerRegistration | 'consent' | 'phoneVerificationConsent' | 'document', TranslationKey>>;
 type Props = { page: Page };
+
+const farmerFieldLabelKeys: Record<FarmerDocumentField, TranslationKey> = {
+  name: 'farmerAuth.fullName',
+  age: 'farmerAuth.age',
+  gender: 'farmerAuth.gender',
+  aadhaar: 'farmerAuth.aadhaar',
+  address: 'farmerAuth.address',
+  date_of_birth: 'farmerAuth.dateOfBirth',
+};
 
 function farmerAuthErrorText(error: unknown, page: Page): TranslationKey {
   if (!(error instanceof FarmerAuthError)) return 'farmerAuth.backendUnavailable';
@@ -59,6 +69,8 @@ export function FarmerAuthFlow({ page }: Props) {
   const { language, t } = useLanguage();
   const [busy, setBusy] = useState(page === 'entry');
   const [notice, setNotice] = useState<TranslationKey | null>(null);
+  const [noticeFields, setNoticeFields] = useState<FarmerDocumentField[]>([]);
+  const [suggestedFullName, setSuggestedFullName] = useState<string | null>(null);
   const [errors, setErrors] = useState<FormErrors>({});
   const [capabilities, setCapabilities] = useState<FarmerCapabilities | null>(null);
   const [loadingCapabilities, setLoadingCapabilities] = useState(true);
@@ -102,6 +114,8 @@ export function FarmerAuthFlow({ page }: Props) {
     setValues((current) => ({ ...current, [field]: value }));
     setErrors((current) => ({ ...current, [field]: undefined }));
     setNotice(null);
+    setNoticeFields([]);
+    setSuggestedFullName(null);
   };
   const retryFarmerEntry = async () => {
     setBusy(true);
@@ -150,6 +164,9 @@ export function FarmerAuthFlow({ page }: Props) {
         discardDocument();
         setDocumentUri(result.assets[0].uri);
         setDocumentType(result.assets[0].mimeType ?? 'image/jpeg');
+        setNotice(null);
+        setNoticeFields([]);
+        setSuggestedFullName(null);
         setErrors((current) => ({ ...current, document: undefined }));
       }
     } catch {
@@ -181,6 +198,9 @@ export function FarmerAuthFlow({ page }: Props) {
       return;
     }
     setBusy(true);
+    setNotice(null);
+    setNoticeFields([]);
+    setSuggestedFullName(null);
     let submitted = false;
     try {
       const result = await submitFarmerRegistration(values, documentUri, documentType, capabilities!.privacyNoticeVersion!);
@@ -194,7 +214,11 @@ export function FarmerAuthFlow({ page }: Props) {
       setNotice(failed ? 'farmerAuth.verificationFailed' : 'farmerAuth.verificationPending');
     } catch (error) {
       if (error instanceof FarmerAuthError && error.code === 'exists') router.replace('/auth/farmer/login' as never);
-      else setNotice(farmerAuthErrorText(error, page));
+      else {
+        setNotice(farmerAuthErrorText(error, page));
+        setNoticeFields(error instanceof FarmerAuthError ? error.fields : []);
+        setSuggestedFullName(error instanceof FarmerAuthError ? error.suggestedFullName : null);
+      }
     } finally {
       if (submitted) {
         if (documentUri?.startsWith('file://')) {
@@ -400,7 +424,16 @@ export function FarmerAuthFlow({ page }: Props) {
   const brand = <View style={styles.brand}><View style={styles.brandMark}><Text style={styles.brandGlyph}>❧</Text></View><View><Text style={styles.brandName}>{t('brand.name')}</Text><Text style={styles.brandRegion}>{t('brand.region')}</Text></View></View>;
   const banner = <View style={styles.demoBanner}><Text style={styles.demoText}>{t(capabilities?.phoneVerificationEnabled ? 'farmerAuth.secureBanner' : 'farmerAuth.demoBanner')}</Text></View>;
   const visibleNotice = notice ?? (page === 'otp' && !farmerAuthRuntime.getPhoneVerification() ? 'farmerAuth.backendUnavailable' : null);
-  const noticeView = visibleNotice ? <Text accessibilityRole="alert" style={styles.notice}>{t(visibleNotice)}</Text> : null;
+  const noticeDetails = noticeFields.length && (notice === 'farmerAuth.documentMismatch' || notice === 'farmerAuth.documentFieldsMissing')
+    ? t(notice === 'farmerAuth.documentMismatch' ? 'farmerAuth.fieldsMismatch' : 'farmerAuth.fieldsUnreadable')
+      .replace('{fields}', noticeFields.map((fieldName) => t(farmerFieldLabelKeys[fieldName])).join(', '))
+    : null;
+  const suggestedNameNotice = notice === 'farmerAuth.documentMismatch' && noticeFields.includes('name') && suggestedFullName
+    ? ` ${t('farmerAuth.suggestedFullName').replace('{name}', suggestedFullName)}`
+    : '';
+  const noticeView = visibleNotice ? <Text accessibilityRole="alert" style={styles.notice}>
+    {t(visibleNotice)}{visibleNotice === notice && noticeDetails ? ` ${noticeDetails}` : ''}{visibleNotice === notice ? suggestedNameNotice : ''}
+  </Text> : null;
   const button = (labelKey: TranslationKey, action: () => void, disabled = false) => <Pressable accessibilityRole="button" disabled={busy || disabled} onPress={action} style={({ pressed }) => [styles.primaryButton, (busy || disabled) && styles.disabled, pressed && styles.pressed]}><Text style={styles.primaryButtonText}>{t(busy ? 'farmerAuth.loading' : labelKey)}</Text></Pressable>;
 
   return <ScreenFrame>

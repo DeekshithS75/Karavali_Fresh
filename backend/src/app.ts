@@ -10,7 +10,7 @@ import { FarmerModel, PendingRegistrationModel } from './models/index.js';
 import { compareAadhaarDocument, isOcrConfigured, OCR_ENGINE_NAME, type RegistrationDetails } from './providers/ocr.js';
 import { NaCallerError } from './providers/otp.js';
 import { ProviderNotConfiguredError } from './providers/errors.js';
-import { ApiError, assertRegistrationAvailable, cancelPhoneVerification, completePhoneVerification, createSession, enforceRateLimit, findAuthenticatedFarmer, getPhoneVerificationStatus, startPhoneVerification } from './services/security.js';
+import { ApiError, assertRegistrationAvailable, cancelPhoneVerification, completePhoneVerification, createSession, enforceRateLimit, findAuthenticatedFarmer, findAuthenticatedSession, getPhoneVerificationStatus, startPhoneVerification } from './services/security.js';
 
 const app = express();
 const upload = multer({
@@ -22,7 +22,9 @@ const upload = multer({
 });
 app.disable('x-powered-by');
 app.use(helmet());
-app.use(cors({ origin: config.MOBILE_ORIGIN === '*' ? true : config.MOBILE_ORIGIN.split(',').map((value) => value.trim()) }));
+app.use(cors({ origin: config.NODE_ENV === 'development' || config.MOBILE_ORIGIN === '*'
+  ? true
+  : config.MOBILE_ORIGIN.split(',').map((value) => value.trim()) }));
 app.use(express.json({ limit: '16kb' }));
 
 const phoneSchema = z.string().trim().regex(/^\+91[6-9]\d{9}$/, 'invalid_phone');
@@ -131,7 +133,13 @@ app.post('/api/farmer/registrations', upload.single('document'), async (request,
       issues: comparison.issues,
       ...(comparison.missingFields ? { missingFields: comparison.missingFields } : {}),
     });
-    if (comparison.status === 'mismatch') return response.status(422).json({ error: 'document_mismatch', fields: comparison.mismatches });
+    if (comparison.status === 'mismatch') return response.status(422).json({
+      error: 'document_mismatch',
+      fields: comparison.mismatches,
+      ...(comparison.mismatches.includes('name') && comparison.fields.fullName
+        ? { suggestedFullName: comparison.fields.fullName }
+        : {}),
+    });
 
     const now = new Date();
     const registration = await PendingRegistrationModel.create({
@@ -268,6 +276,21 @@ app.get('/api/farmer/auth/session', async (request, response) => {
   try {
     const { farmer, session } = await findAuthenticatedFarmer(request.header('authorization'));
     return response.json({ valid: true, role: 'farmer', farmerId: farmer.id, expiresAt: session.expiresAt });
+  } catch (error) { return sendError(response, error); }
+});
+
+app.get('/api/farmer/profile', async (request, response) => {
+  try {
+    const session = await findAuthenticatedSession(request.header('authorization'));
+    const farmer = await FarmerModel.findById(session.farmerId)
+      .select('fullName accountStatus phoneVerificationStatus documentComparisonStatus')
+      .lean()
+      .exec() as { fullName: string; accountStatus: string; phoneVerificationStatus: string; documentComparisonStatus: string } | null;
+    if (!farmer) throw new ApiError(404, 'farmer_not_found');
+    if (farmer.accountStatus !== 'active' || farmer.phoneVerificationStatus !== 'verified' || farmer.documentComparisonStatus !== 'passed') {
+      throw new ApiError(401, 'invalid_session');
+    }
+    return response.json({ profile: { fullName: farmer.fullName } });
   } catch (error) { return sendError(response, error); }
 });
 

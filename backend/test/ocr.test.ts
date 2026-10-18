@@ -30,15 +30,40 @@ test('extracts Aadhaar fields using text labels rather than fixed card coordinat
   assert.equal(fields.gender, 'male');
   assert.equal(fields.fullName, 'Sample Farmer');
   assert.match(fields.addressText ?? '', /Village Example/);
-  assert.deepEqual(compareExtractedFields(fields, farmer, new Date('2026-01-02T00:00:00.000Z')), {
-    name: true, age: true, gender: true, aadhaar: true, address: true,
+  assert.deepEqual(compareExtractedFields(fields, farmer), {
+    name: true, gender: true, aadhaar: true, address: true,
   });
 });
 
 test('reports field mismatch without returning extracted Aadhaar data as the error', () => {
   const fields = extractAadhaarFieldsFromLines(lines);
-  const result = compareExtractedFields(fields, { ...farmer, fullName: 'Different Person' }, new Date('2026-01-02T00:00:00.000Z'));
-  assert.deepEqual(result, { name: false, age: true, gender: true, aadhaar: true, address: true });
+  const result = compareExtractedFields(fields, { ...farmer, fullName: 'Different Person' });
+  assert.deepEqual(result, { name: false, gender: true, aadhaar: true, address: true });
+});
+
+test('registration comparison does not verify entered age against document date of birth', () => {
+  const withoutDobLines = lines.filter(({ text }) => !/DOB|ಜನ್ಮ/i.test(text));
+  const withoutBirthDate = extractAadhaarFieldsFromLines(withoutDobLines);
+  const entered = { ...farmer, age: 99 };
+  assert.equal(withoutBirthDate.dateOfBirth, null);
+  assert.deepEqual(compareExtractedFields(withoutBirthDate, entered), {
+    name: true, gender: true, aadhaar: true, address: true,
+  });
+});
+
+test('address comparison accepts meaningful partial overlap and a one-character OCR variation', () => {
+  const fields = { ...extractAadhaarFieldsFromLines(lines), addressText: 'Shivakrupa Nilaya, Renja, Karnataka' };
+  const entered = { ...farmer, address: 'Shivakrupa Nilaya, Renja, Karkala Taluk' };
+  assert.equal(compareExtractedFields(fields, entered).address, true);
+
+  const talukuFields = { ...fields, addressText: 'Shivakrupa Nilaya, Renja, Karkala Taluku' };
+  assert.equal(compareExtractedFields(talukuFields, entered).address, true);
+});
+
+test('address comparison still fails when fewer than two meaningful tokens match', () => {
+  const fields = { ...extractAadhaarFieldsFromLines(lines), addressText: 'Shivakrupa Nilaya' };
+  const entered = { ...farmer, address: 'Shivakrupa Nilaya, Renja, Karkala Taluk' };
+  assert.equal(compareExtractedFields(fields, entered).address, false);
 });
 
 test('uses bilingual labels and does not assume the name/address blocks occupy fixed positions', () => {
@@ -53,8 +78,8 @@ test('uses bilingual labels and does not assume the name/address blocks occupy f
     { text: 'Gender / ಲಿಂಗ: Male', confidence: 91 },
   ];
   const fields = extractAadhaarFieldsFromLines(reordered);
-  assert.deepEqual(compareExtractedFields(fields, farmer, new Date('2026-01-02T00:00:00.000Z')), {
-    name: true, age: true, gender: true, aadhaar: true, address: true,
+  assert.deepEqual(compareExtractedFields(fields, farmer), {
+    name: true, gender: true, aadhaar: true, address: true,
   });
 });
 
@@ -99,7 +124,7 @@ test('full name comparison requires the complete extracted name, not a matching 
     { text: 'DOB: 01/01/1980', confidence: 95 },
   ]);
   assert.equal(extracted.fullName, 'Sample Farmer Holdings');
-  const comparison = compareExtractedFields(extracted, farmer, new Date('2026-01-02T00:00:00.000Z'));
+  const comparison = compareExtractedFields(extracted, farmer);
   assert.equal(comparison.name, false);
 });
 
@@ -107,7 +132,7 @@ test('runs local English/Kannada Tesseract OCR on an in-memory synthetic image',
   await initializeOcr();
   const svg = `<svg width="1300" height="1700" xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%" fill="white"/><g font-family="Noto Sans Kannada, Arial" font-size="48" fill="black"><text x="90" y="200">To</text><text x="90" y="280">Sample Farmer</text><text x="90" y="360">Village Example District Example</text><text x="90" y="500">Aadhaar No. / ಆಧಾರ್ ಸಂಖ್ಯೆ</text><text x="90" y="580">9999 8888 7777</text><text x="90" y="900">Name: Sample Farmer</text><text x="90" y="1000">ಜನ್ಮ ದಿನಾಂಕ / Date of Birth: 01/01/1980</text><text x="90" y="1100">ಲಿಂಗ / Gender: Male</text><text x="90" y="1250">ವಿಳಾಸ / Address</text><text x="90" y="1330">Village Example District Example Karnataka</text></g></svg>`;
   const image = await sharp(Buffer.from(svg)).png().toBuffer();
-  const result = await compareAadhaarDocument(image, 'image/png', farmer, new Date('2026-01-02T00:00:00.000Z'));
+  const result = await compareAadhaarDocument(image, 'image/png', farmer);
   assert.equal(result.status, 'matched', result.status === 'unreadable' ? result.issues.join(',') : result.status === 'mismatch' ? result.mismatches.join(',') : '');
   const preview = await testAadhaarDocument(image, 'image/png', { fullName: farmer.fullName, dateOfBirth: '1980-01-01', gender: farmer.gender, address: farmer.address });
   assert.equal(preview.status, 'match');

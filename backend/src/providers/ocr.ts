@@ -30,8 +30,8 @@ export type ExtractedAadhaarFields = {
 
 export type OcrComparison =
   | { status: 'matched'; fields: ExtractedAadhaarFields }
-  | { status: 'mismatch'; fields: ExtractedAadhaarFields; mismatches: Array<'name' | 'age' | 'gender' | 'aadhaar' | 'address'> }
-  | { status: 'unreadable'; issues: Array<'low_resolution' | 'too_bright' | 'too_dark' | 'low_contrast' | 'blurred' | 'unsupported_image' | 'text_not_recognized' | 'required_fields_missing'>; missingFields?: Array<'aadhaar' | 'date_of_birth' | 'gender' | 'name' | 'address'> };
+  | { status: 'mismatch'; fields: ExtractedAadhaarFields; mismatches: Array<'name' | 'gender' | 'aadhaar' | 'address'> }
+  | { status: 'unreadable'; issues: Array<'low_resolution' | 'too_bright' | 'too_dark' | 'low_contrast' | 'blurred' | 'unsupported_image' | 'text_not_recognized' | 'required_fields_missing'>; missingFields?: Array<'aadhaar' | 'gender' | 'name' | 'address'> };
 type OcrIssue = Extract<OcrComparison, { status: 'unreadable' }>['issues'][number];
 
 export type OcrTestExpected = { fullName: string; dateOfBirth: string; gender: RegistrationDetails['gender']; address: string };
@@ -147,6 +147,41 @@ const nonNameText = /\b(?:government|unique|identification|authority|india|aadha
 const normalizeText = (value: string) => value.normalize('NFKC').toLocaleLowerCase('en').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 const tokens = (value: string) => normalizeText(value).split(/\s+/).filter((part) => part.length > 1);
 
+function addressTokenMatches(expected: string, extracted: string) {
+  if (expected === extracted) return true;
+  if (expected.length < 5 || extracted.length < 5 || Math.abs(expected.length - extracted.length) > 1) return false;
+  let expectedIndex = 0;
+  let extractedIndex = 0;
+  let edits = 0;
+  while (expectedIndex < expected.length && extractedIndex < extracted.length) {
+    if (expected[expectedIndex] === extracted[extractedIndex]) {
+      expectedIndex++;
+      extractedIndex++;
+    } else {
+      if (++edits > 1) return false;
+      if (expected.length >= extracted.length) expectedIndex++;
+      if (extracted.length >= expected.length) extractedIndex++;
+    }
+  }
+  return edits + Number(expectedIndex < expected.length || extractedIndex < extracted.length) <= 1;
+}
+
+/** Allow omitted address components and one-character OCR errors, while requiring at least two meaningful matching tokens. */
+function addressesMatch(entered: string, extracted: string) {
+  const enteredTokens = [...new Set(tokens(entered))];
+  if (enteredTokens.length < 3) return false;
+  const remainingExtracted = new Set(tokens(extracted));
+  let matchedCount = 0;
+  for (const expectedToken of enteredTokens) {
+    const match = [...remainingExtracted].find((token) => addressTokenMatches(expectedToken, token));
+    if (match) {
+      matchedCount++;
+      remainingExtracted.delete(match);
+    }
+  }
+  return matchedCount >= Math.max(2, Math.ceil(enteredTokens.length * 0.6));
+}
+
 function cleanNameLine(line: string): string | null {
   const labelled = nameLabel.exec(line.trim());
   // Tesseract sometimes merges the Kannada and English name with a serial or
@@ -159,19 +194,19 @@ function cleanNameLine(line: string): string | null {
   return candidates.find((candidate) => /\p{Script=Latin}/u.test(candidate)) ?? candidates[0] ?? null;
 }
 
-function extractFullName(lines: string[], dateIndex: number): string | null {
-  if (dateIndex < 1) return null;
+function extractFullName(lines: string[], detailsIndex: number): string | null {
+  if (detailsIndex < 1) return null;
   const recipientIndex = lines.findIndex((line) => /^\s*(?:to\b|ಗೆ(?:\s|$))/i.test(line));
   const aadhaarAfterRecipient = recipientIndex >= 0
     ? lines.findIndex((line, index) => index > recipientIndex && aadhaarLabel.test(line))
     : -1;
   // A recipient block is address context. If it is present but no Aadhaar
   // section boundary can be found, do not guess a name from that block.
-  if (recipientIndex >= 0 && recipientIndex < dateIndex && aadhaarAfterRecipient < 0) return null;
-  // The name is associated with the lower-section DOB/gender details. Search only
+  if (recipientIndex >= 0 && recipientIndex < detailsIndex && aadhaarAfterRecipient < 0) return null;
+  // The name is associated with the lower-section personal details. Search only
   // nearby preceding lines and choose the nearest line that contains just a name.
-  const start = Math.max(0, dateIndex - 3);
-  for (let index = dateIndex - 1; index >= start; index--) {
+  const start = Math.max(0, detailsIndex - 3);
+  for (let index = detailsIndex - 1; index >= start; index--) {
     if (recipientIndex >= 0 && index > recipientIndex && index < aadhaarAfterRecipient) continue;
     const candidate = cleanNameLine(lines[index]!);
     if (candidate) return candidate;
@@ -190,7 +225,11 @@ function namesMatch(actual: string | null, expected: string): boolean {
 export function extractAadhaarFieldsFromLines(lines: OcrLine[]): ExtractedAadhaarFields {
   const texts = lines.map((line) => line.text);
   const dateIndex = lines.findIndex((line) => dateLabel.test(line.text));
-  const context = texts.slice(Math.max(0, dateIndex - 2), Math.min(texts.length, dateIndex + 3)).join(' ');
+  const genderIndex = lines.findIndex((line) => /\b(?:gender|male|female|transgender)\b|ಲಿಂಗ|ಪುರುಷ|ಮಹಿಳೆ/i.test(line.text));
+  const lowerDetailsIndex = dateIndex >= 0 ? dateIndex : genderIndex;
+  const context = dateIndex >= 0
+    ? texts.slice(Math.max(0, dateIndex - 2), Math.min(texts.length, dateIndex + 3)).join(' ')
+    : '';
   const dateMatch = context.match(/(?:\b\d{1,2}[/.\-]\d{1,2}[/.\-]\d{4}\b|\b\d{4}[/.\-]\d{1,2}[/.\-]\d{1,2}\b)/);
   const yearMatch = context.match(/(?:year\s+of\s+birth|ಜನ್ಮ\s*ವರ್ಷ)\D{0,12}(19\d{2}|20\d{2})/i);
   let dateOfBirth: string | null = null;
@@ -206,14 +245,16 @@ export function extractAadhaarFieldsFromLines(lines: OcrLine[]): ExtractedAadhaa
     }
   } else if (yearMatch) birthYear = Number(yearMatch[1]);
 
-  const genderContext = texts.slice(Math.max(0, dateIndex - 2), Math.min(texts.length, dateIndex + 4)).join(' ').toLocaleLowerCase('en');
+  const genderContext = lowerDetailsIndex >= 0
+    ? texts.slice(Math.max(0, lowerDetailsIndex - 2), Math.min(texts.length, lowerDetailsIndex + 4)).join(' ').toLocaleLowerCase('en')
+    : '';
   const gender: RegistrationDetails['gender'] | null = /\b(?:female|woman)\b|ಮಹಿಳೆ|स्त्री/.test(genderContext)
     ? 'female'
     : /\b(?:male|man)\b|ಪುರುಷ|पुरुष/.test(genderContext)
       ? 'male'
       : /transgender|ತೃತೀಯ ಲಿಂಗ/i.test(genderContext) ? 'other' : null;
 
-  const fullName = extractFullName(texts, dateIndex);
+  const fullName = extractFullName(texts, lowerDetailsIndex);
 
   const aadhaarNumber = (() => {
     const matches: string[] = [];
@@ -242,33 +283,18 @@ export function extractAadhaarFieldsFromLines(lines: OcrLine[]): ExtractedAadhaa
   return { aadhaarNumber, dateOfBirth, birthYear, gender, fullName, addressText };
 }
 
-function calculatedAge(birthDate: string, now: Date): number {
-  const date = new Date(`${birthDate}T00:00:00.000Z`);
-  let age = now.getUTCFullYear() - date.getUTCFullYear();
-  if (now.getUTCMonth() < date.getUTCMonth() ||
-      (now.getUTCMonth() === date.getUTCMonth() && now.getUTCDate() < date.getUTCDate())) age--;
-  return age;
-}
-
-export function compareExtractedFields(extracted: ExtractedAadhaarFields, entered: RegistrationDetails, now: Date) {
+export function compareExtractedFields(extracted: ExtractedAadhaarFields, entered: RegistrationDetails) {
   const nameMatches = namesMatch(extracted.fullName, entered.fullName);
-  const ageMatches = extracted.dateOfBirth
-    ? calculatedAge(extracted.dateOfBirth, now) === entered.age
-    : extracted.birthYear !== null && [now.getUTCFullYear() - extracted.birthYear, now.getUTCFullYear() - extracted.birthYear - 1].includes(entered.age);
-  const enteredAddress = [...new Set(tokens(entered.address))];
-  const documentAddress = new Set(tokens(extracted.addressText ?? ''));
-  const addressMatchCount = enteredAddress.filter((part) => documentAddress.has(part)).length;
-  const addressMatches = enteredAddress.length >= 3 && addressMatchCount / enteredAddress.length >= 0.8;
+  const addressMatches = addressesMatch(entered.address, extracted.addressText ?? '');
   return {
     name: nameMatches,
-    age: ageMatches,
     gender: extracted.gender === entered.gender,
     aadhaar: extracted.aadhaarNumber === entered.aadhaar,
     address: addressMatches,
   };
 }
 
-export async function compareAadhaarDocument(buffer: Buffer, mimeType: string, entered: RegistrationDetails, now = new Date()): Promise<OcrComparison> {
+export async function compareAadhaarDocument(buffer: Buffer, mimeType: string, entered: RegistrationDetails): Promise<OcrComparison> {
   if (!engineReady || !workerPromise) throw new Error('ocr_engine_unavailable');
   if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) return { status: 'unreadable', issues: ['unsupported_image'] };
   const prepared = await prepareImage(buffer);
@@ -281,12 +307,11 @@ export async function compareAadhaarDocument(buffer: Buffer, mimeType: string, e
     const fields = extractAadhaarFieldsFromLines(lines);
     const missing: string[] = [];
     if (!fields.aadhaarNumber) missing.push('aadhaar');
-    if (!fields.dateOfBirth && !fields.birthYear) missing.push('date_of_birth');
     if (!fields.gender) missing.push('gender');
     if (!fields.fullName) missing.push('name');
     if (!fields.addressText) missing.push('address');
     if (missing.length) return { status: 'unreadable', issues: ['required_fields_missing'], missingFields: missing as NonNullable<Extract<OcrComparison, { status: 'unreadable' }>['missingFields']> };
-    const comparison = compareExtractedFields(fields, entered, now);
+    const comparison = compareExtractedFields(fields, entered);
     const mismatches = (Object.entries(comparison) as Array<[keyof typeof comparison, boolean]>)
       .filter(([, equal]) => !equal).map(([field]) => field);
     return mismatches.length ? { status: 'mismatch', fields, mismatches } : { status: 'matched', fields };
@@ -315,9 +340,7 @@ export async function testAadhaarDocument(buffer: Buffer, mimeType: string, expe
       address: fields.addressText,
     };
     const nameMatches = namesMatch(fields.fullName, expected.fullName);
-    const enteredAddress = [...new Set(tokens(expected.address))];
-    const documentAddress = new Set(tokens(fields.addressText ?? ''));
-    const addressMatches = enteredAddress.length >= 3 && enteredAddress.filter((token) => documentAddress.has(token)).length / enteredAddress.length >= 0.8;
+    const addressMatches = addressesMatch(expected.address, fields.addressText ?? '');
     const comparisons = {
       fullName: !fields.fullName ? 'unreadable' as const : nameMatches ? 'match' as const : 'mismatch' as const,
       dateOfBirth: !fields.dateOfBirth ? 'unreadable' as const : fields.dateOfBirth === expected.dateOfBirth ? 'match' as const : 'mismatch' as const,

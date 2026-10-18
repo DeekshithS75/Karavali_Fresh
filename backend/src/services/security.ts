@@ -187,13 +187,18 @@ export async function createSession(farmerId: Types.ObjectId) {
   return { accessToken: rawToken, expiresAt: expiresAt.toISOString() };
 }
 
-export async function findAuthenticatedFarmer(authorization: string | undefined) {
+export async function findAuthenticatedSession(authorization: string | undefined) {
   if (!areSessionSecretsConfigured()) throw new ApiError(503, 'session_signing_not_configured');
   if (!authorization?.startsWith('Bearer ')) throw new ApiError(401, 'authentication_required');
   const rawToken = authorization.slice(7);
   if (rawToken.length < 32 || rawToken.length > 256) throw new ApiError(401, 'invalid_session');
   const session = await SessionModel.findOne({ tokenHash: hmac(rawToken), revokedAt: null, expiresAt: { $gt: new Date() } });
   if (!session) throw new ApiError(401, 'invalid_session');
+  return session;
+}
+
+export async function findAuthenticatedFarmer(authorization: string | undefined) {
+  const session = await findAuthenticatedSession(authorization);
   const farmer = await FarmerModel.findById(session.farmerId);
   if (!farmer || farmer.accountStatus !== 'active' || farmer.phoneVerificationStatus !== 'verified' || farmer.documentComparisonStatus !== 'passed') {
     throw new ApiError(401, 'invalid_session');
