@@ -42,8 +42,15 @@
         "expo-image-picker",
         {
           "photosPermission": "Allow Karavali Fresh to select a verification document after you consent.",
-          "cameraPermission": "Allow Karavali Fresh to capture a verification document after you consent.",
+          "cameraPermission": "Allow Karavali Fresh to capture produce photos and verification documents after you consent.",
           "microphonePermission": false
+        }
+      ],
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Allow Karavali Fresh to use the microphone for produce name dictation.",
+          "speechRecognitionPermission": "Allow Karavali Fresh to recognize produce name dictation."
         }
       ]
     ],

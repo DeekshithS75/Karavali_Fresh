@@ -58,6 +58,17 @@ const rateLimitSchema = new Schema({
   expiresAt: { type: Date, required: true, index: { expires: 0 } },
 }, { versionKey: false, strict: 'throw' });
 
+const produceSchema = new Schema({
+  farmerId: { type: Schema.Types.ObjectId, ref: 'Farmer', required: true, index: true },
+  submissionId: { type: String, required: true },
+  name: { type: String, required: true, trim: true, maxlength: 120 },
+  quantity: { type: Number, required: true, min: Number.MIN_VALUE },
+  unit: { type: String, enum: ['kg', 'quintal', 'bunch', 'pieces'], required: true },
+  photos: [{ storageKey: { type: String, required: true }, mimeType: { type: String, enum: ['image/jpeg', 'image/png', 'image/webp'], required: true }, size: { type: Number, required: true } }],
+  status: { type: String, enum: ['awaiting_price'], required: true, default: 'awaiting_price' },
+}, { timestamps: true, strict: 'throw' });
+produceSchema.index({ farmerId: 1, submissionId: 1 }, { unique: true });
+
 export type Farmer = InferSchemaType<typeof farmerSchema>;
 export type PendingFarmerRegistration = InferSchemaType<typeof pendingRegistrationSchema>;
 export const FarmerModel = mongoose.models.Farmer ?? mongoose.model('Farmer', farmerSchema);
@@ -65,3 +76,4 @@ export const PendingRegistrationModel = mongoose.models.PendingFarmerRegistratio
 export const OtpChallengeModel = mongoose.models.FarmerOtpChallenge ?? mongoose.model('FarmerOtpChallenge', otpChallengeSchema);
 export const SessionModel = mongoose.models.FarmerSession ?? mongoose.model('FarmerSession', sessionSchema);
 export const RateLimitModel = mongoose.models.FarmerRateLimit ?? mongoose.model('FarmerRateLimit', rateLimitSchema);
+export const ProduceModel = mongoose.models.FarmerProduce ?? mongoose.model('FarmerProduce', produceSchema);

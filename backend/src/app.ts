@@ -6,11 +6,12 @@ import multer from 'multer';
 import { z } from 'zod';
 import { areSessionSecretsConfigured, config, isPhoneVerificationConfigured, isRegistrationEncryptionConfigured } from './config.js';
 import { decryptSecretValue, encryptSecretValue, hashAadhaar, hashPhone, hmac } from './crypto.js';
-import { FarmerModel, PendingRegistrationModel } from './models/index.js';
+import { FarmerModel, PendingRegistrationModel, ProduceModel } from './models/index.js';
 import { compareAadhaarDocument, isOcrConfigured, OCR_ENGINE_NAME, type RegistrationDetails } from './providers/ocr.js';
 import { NaCallerError } from './providers/otp.js';
 import { ProviderNotConfiguredError } from './providers/errors.js';
 import { ApiError, assertRegistrationAvailable, cancelPhoneVerification, completePhoneVerification, createSession, enforceRateLimit, findAuthenticatedFarmer, findAuthenticatedSession, getPhoneVerificationStatus, startPhoneVerification } from './services/security.js';
+import { deleteProducePhotos, readProducePhoto, storeProducePhotos, ProduceStorageError } from './services/produce-storage.js';
 
 const app = express();
 const upload = multer({
@@ -19,6 +20,13 @@ const upload = multer({
   fileFilter: (_request, file, callback) => {
     callback(null, ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'].includes(file.mimetype));
   },
+});
+const produceUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024, files: 5 },
+  fileFilter: (_request, file, callback) => ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype)
+    ? callback(null, true)
+    : callback(new Error('invalid_produce_image')),
 });
 app.disable('x-powered-by');
 app.use(helmet());
@@ -42,6 +50,12 @@ const registrationSchema = z.object({
   privacyNoticeVersion: z.string().min(1).max(80),
 });
 const challengeIdSchema = z.string().regex(/^[a-f\d]{24}$/i);
+const produceInputSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  quantity: z.coerce.number().finite().positive().max(1_000_000_000),
+  unit: z.enum(['kg', 'quintal', 'bunch', 'pieces']),
+});
+const submissionIdSchema = z.string().uuid();
 type PendingFarmerDetails = Omit<RegistrationDetails, 'aadhaar'>;
 
 function sendError(response: Response, error: unknown) {
@@ -56,6 +70,16 @@ function sendError(response: Response, error: unknown) {
     if (error.code === 'request_not_found') return response.status(502).json({ error: 'verification_request_unavailable' });
     return response.status(503).json({ error: 'verification_provider_unavailable' });
   }
+  if (error instanceof ProduceStorageError) {
+    if (error.code === 'invalid_image') return response.status(400).json({ error: 'invalid_produce_image' });
+    if (error.code === 'not_found') return response.status(404).json({ error: 'produce_image_not_found' });
+    if (error.code === 'not_configured') return response.status(503).json({ error: 'produce_image_storage_not_configured' });
+    return response.status(503).json({ error: 'produce_image_storage_failed' });
+  }
+  if (error instanceof multer.MulterError) {
+    return response.status(400).json({ error: error.code === 'LIMIT_FILE_SIZE' ? 'produce_image_too_large' : error.code === 'LIMIT_FILE_COUNT' ? 'too_many_produce_images' : 'invalid_produce_upload' });
+  }
+  if (error instanceof Error && error.message === 'invalid_produce_image') return response.status(400).json({ error: 'invalid_produce_image' });
   if (error instanceof Error && error.message === 'ocr_engine_unavailable') {
     return response.status(503).json({ error: 'ocr_engine_unavailable' });
   }
@@ -291,6 +315,89 @@ app.get('/api/farmer/profile', async (request, response) => {
       throw new ApiError(401, 'invalid_session');
     }
     return response.json({ profile: { fullName: farmer.fullName } });
+  } catch (error) { return sendError(response, error); }
+});
+
+function formatProduce(record: { id: string; name: string; quantity: number; unit: string; status: string; photos: Array<{ storageKey: string; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date }) {
+  return {
+    id: record.id,
+    name: record.name,
+    quantity: record.quantity,
+    unit: record.unit,
+    status: record.status,
+    photos: record.photos.map((photo, index) => ({
+      url: `/api/farmer/produce/${record.id}/photos/${index}`,
+      mimeType: photo.mimeType,
+      size: photo.size,
+    })),
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+app.get('/api/farmer/produce', async (request, response) => {
+  try {
+    const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
+    const records = await ProduceModel.find({ farmerId: farmer._id }).sort({ createdAt: -1 }).lean().exec() as unknown as Array<{
+      _id: Types.ObjectId; name: string; quantity: number; unit: string; status: string;
+      photos: Array<{ storageKey: string; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date;
+    }>;
+    return response.json({ items: records.map((record) => formatProduce({ ...record, id: String(record._id) })) });
+  } catch (error) { return sendError(response, error); }
+});
+
+app.post('/api/farmer/produce', produceUpload.array('photos', 5), async (request, response) => {
+  let storedPhotos: Awaited<ReturnType<typeof storeProducePhotos>> = [];
+  let ownerId: Types.ObjectId | null = null;
+  let requestSubmissionId: string | null = null;
+  try {
+    const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
+    const submissionId = submissionIdSchema.parse(request.header('idempotency-key'));
+    ownerId = farmer._id;
+    requestSubmissionId = submissionId;
+    const input = produceInputSchema.parse(request.body);
+    const uploads = (request.files ?? []) as Express.Multer.File[];
+    if (uploads.length < 2 || uploads.length > 5) throw new ApiError(400, 'produce_photo_count_invalid');
+    const existing = await ProduceModel.findOne({ farmerId: farmer._id, submissionId }).lean().exec() as {
+      _id: Types.ObjectId; name: string; quantity: number; unit: string; status: string;
+      photos: Array<{ storageKey: string; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date;
+    } | null;
+    if (existing) return response.status(200).json({ item: formatProduce({ ...existing, id: String(existing._id) }) });
+
+    storedPhotos = await storeProducePhotos(uploads);
+    const [record] = await ProduceModel.create([{
+      farmerId: farmer._id, submissionId, name: input.name, quantity: input.quantity, unit: input.unit,
+      photos: storedPhotos, status: 'awaiting_price',
+    }]);
+    return response.status(201).json({ item: formatProduce({
+      id: String(record._id), name: record.name, quantity: record.quantity, unit: record.unit,
+      status: record.status, photos: record.photos, createdAt: record.createdAt, updatedAt: record.updatedAt,
+    }) });
+  } catch (error) {
+    await deleteProducePhotos(storedPhotos);
+    if (ownerId && requestSubmissionId && error instanceof Error && 'code' in error && error.code === 11000) {
+      const existing = await ProduceModel.findOne({ farmerId: ownerId, submissionId: requestSubmissionId }).lean().exec() as unknown as {
+        _id: Types.ObjectId; name: string; quantity: number; unit: string; status: string;
+        photos: Array<{ storageKey: string; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date;
+      } | null;
+      if (existing) return response.status(200).json({ item: formatProduce({ ...existing, id: String(existing._id) }) });
+    }
+    return sendError(response, error);
+  }
+});
+
+app.get('/api/farmer/produce/:produceId/photos/:photoIndex', async (request, response) => {
+  try {
+    const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
+    if (!Types.ObjectId.isValid(request.params.produceId)) throw new ApiError(404, 'produce_image_not_found');
+    const record = await ProduceModel.findOne({ _id: request.params.produceId, farmerId: farmer._id }).lean().exec() as {
+      photos: Array<{ storageKey: string; mimeType: string }>;
+    } | null;
+    const index = Number(request.params.photoIndex);
+    if (!record || !Number.isInteger(index) || index < 0 || index >= record.photos.length) throw new ProduceStorageError('not_found');
+    const photo = record.photos[index]!;
+    const bytes = await readProducePhoto(photo.storageKey);
+    response.type(photo.mimeType).set('Cache-Control', 'private, no-store').send(bytes);
   } catch (error) { return sendError(response, error); }
 });
 

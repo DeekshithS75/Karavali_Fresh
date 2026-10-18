@@ -5,4 +5,5 @@ dist/
 !.env.example
 coverage/
 .cache/
+.local-produce-images/
 *.tsbuildinfo

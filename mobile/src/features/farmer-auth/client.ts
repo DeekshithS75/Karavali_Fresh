@@ -7,7 +7,7 @@ import { appendRegistrationDocument } from './document-upload';
 
 const API_BASE = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 
-type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'exists' | 'documentRequired' | 'invalidDocument' | 'documentMismatch' | 'documentUnreadable' | 'documentFieldsMissing' | 'verificationNotConfigured' | 'verificationProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound' | 'profileNotFound' | 'verificationExpired' | 'configurationIncomplete' | 'privacyNoticeOutdated' | 'validationFailed';
+type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'exists' | 'documentRequired' | 'invalidDocument' | 'documentMismatch' | 'documentUnreadable' | 'documentFieldsMissing' | 'verificationNotConfigured' | 'verificationProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound' | 'profileNotFound' | 'verificationExpired' | 'configurationIncomplete' | 'privacyNoticeOutdated' | 'validationFailed' | 'producePhotoCount' | 'producePhotoTooLarge' | 'produceImageInvalid' | 'produceStorageUnavailable';
 export type FarmerDocumentField = 'name' | 'age' | 'gender' | 'aadhaar' | 'address' | 'date_of_birth';
 
 const farmerDocumentFields: FarmerDocumentField[] = ['name', 'age', 'gender', 'aadhaar', 'address', 'date_of_birth'];
@@ -61,6 +61,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       if (body.error === 'registration_encryption_not_configured' || body.error === 'session_signing_not_configured') throw new FarmerAuthError('configurationIncomplete');
       if (body.error === 'privacy_notice_version_mismatch') throw new FarmerAuthError('privacyNoticeOutdated');
       if (body.error === 'validation_failed') throw new FarmerAuthError('validationFailed');
+      if (body.error === 'produce_photo_count_invalid' || body.error === 'too_many_produce_images') throw new FarmerAuthError('producePhotoCount');
+      if (body.error === 'produce_image_too_large') throw new FarmerAuthError('producePhotoTooLarge');
+      if (body.error === 'invalid_produce_image' || body.error === 'invalid_produce_upload') throw new FarmerAuthError('produceImageInvalid');
+      if (body.error === 'produce_image_storage_not_configured' || body.error === 'produce_image_storage_failed') throw new FarmerAuthError('produceStorageUnavailable');
     }
     throw new FarmerAuthError(response.status === 404 || response.status === 503 ? 'unavailable' : response.status === 409 ? 'exists' : 'rejected');
   }
@@ -130,6 +134,57 @@ export async function hasValidFarmerSession(): Promise<boolean> {
 }
 
 export type FarmerProfile = { fullName: string };
+
+export type FarmerProduce = {
+  id: string;
+  name: string;
+  quantity: number;
+  unit: 'kg' | 'quintal' | 'bunch' | 'pieces';
+  status: 'awaiting_price';
+  photos: { url: string; mimeType: string; size: number; headers: { Authorization: string } }[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export async function getFarmerProduce(signal?: AbortSignal): Promise<FarmerProduce[]> {
+  const tokens = await readTokens();
+  if (!tokens) throw new FarmerAuthError('unauthorized');
+  const result = await request<{ items: (Omit<FarmerProduce, 'photos'> & { photos: Omit<FarmerProduce['photos'][number], 'headers'>[] })[] }>('/api/farmer/produce', {
+    headers: { Authorization: `Bearer ${tokens.accessToken}` }, signal,
+  });
+  if (!Array.isArray(result.items)) throw new FarmerAuthError('rejected');
+  return result.items.map((item) => ({
+    ...item,
+    photos: item.photos.map((photo) => ({ ...photo, url: apiUrl(photo.url), headers: { Authorization: `Bearer ${tokens.accessToken}` } })),
+  }));
+}
+
+export async function createFarmerProduce(input: { name: string; quantity: string; unit: FarmerProduce['unit']; photos: { uri: string; mimeType?: string; fileSize?: number }[] }, submissionId: string) {
+  const tokens = await readTokens();
+  if (!tokens) throw new FarmerAuthError('unauthorized');
+  const body = new FormData();
+  body.append('name', input.name.trim());
+  body.append('quantity', input.quantity);
+  body.append('unit', input.unit);
+  for (const [index, photo] of input.photos.entries()) {
+    const mimeType = photo.mimeType && ['image/jpeg', 'image/png', 'image/webp'].includes(photo.mimeType) ? photo.mimeType : 'image/jpeg';
+    if (Platform.OS === 'web') {
+      const response = await fetch(photo.uri);
+      if (!response.ok) throw new FarmerAuthError('invalidDocument');
+      const blob = await response.blob();
+      if (blob.size > 8 * 1024 * 1024 || blob.type !== mimeType) throw new FarmerAuthError('invalidDocument');
+      body.append('photos', blob, `produce-${index + 1}.${mimeType.split('/')[1]}`);
+    } else {
+      body.append('photos', { uri: photo.uri, name: `produce-${index + 1}.${mimeType.split('/')[1]}`, type: mimeType } as never);
+    }
+  }
+  const result = await request<{ item: FarmerProduce }>('/api/farmer/produce', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokens.accessToken}`, 'Idempotency-Key': submissionId },
+    body,
+  });
+  return result.item;
+}
 
 export async function getFarmerProfile(signal?: AbortSignal): Promise<FarmerProfile> {
   const tokens = await readTokens();
