@@ -1,10 +1,12 @@
 import { router } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import { useEffect, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { LanguageSelector } from '@/components/language-selector';
 import { useLanguage } from '@/localization/LanguageProvider';
+import { hasStoredFarmerSession, hasValidFarmerSession } from '@/features/farmer-auth/client';
 
 const colors = {
   green: '#287A49',
@@ -23,6 +25,20 @@ export default function WelcomeScreen() {
   const { width } = useWindowDimensions();
   const compact = width < 390;
   const { t } = useLanguage();
+  const [restoringFarmer, setRestoringFarmer] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    hasStoredFarmerSession().then(async (hasSession) => {
+      if (!active || !hasSession) return;
+      setRestoringFarmer(true);
+      const valid = await hasValidFarmerSession();
+      if (!active) return;
+      if (valid) router.replace('/farmer');
+      else setRestoringFarmer(false);
+    }).catch(() => { if (active) setRestoringFarmer(false); });
+    return () => { active = false; };
+  }, []);
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -71,19 +87,22 @@ export default function WelcomeScreen() {
           <View style={styles.actionCard}>
             <Text style={styles.actionTitle}>{t('welcome.joinTitle')}</Text>
             <Text style={styles.actionSubtitle}>{t('welcome.joinDescription')}</Text>
+            {restoringFarmer ? <Text accessibilityRole="alert" style={styles.restoringNote}>{t('farmerAuth.checkingSession')}</Text> : null}
 
             <RoleButton
               title={t('welcome.farmerButton')}
               subtitle={t('welcome.farmerSubtitle')}
               icon="🌱"
-              onPress={() => router.push('/farmer')}
+              onPress={() => router.push('/auth/farmer')}
+              disabled={restoringFarmer}
               primary
             />
             <RoleButton
               title={t('welcome.consumerButton')}
               subtitle={t('welcome.consumerSubtitle')}
               icon="🧺"
-              onPress={() => router.push('/consumer')}
+              onPress={() => router.push('/auth/consumer/login')}
+              disabled={restoringFarmer}
             />
             <Text style={styles.footerNote}>{t('welcome.footer')}</Text>
           </View>
@@ -99,18 +118,22 @@ type RoleButtonProps = {
   icon: string;
   onPress: () => void;
   primary?: boolean;
+  disabled?: boolean;
 };
 
-function RoleButton({ title, subtitle, icon, onPress, primary = false }: RoleButtonProps) {
+function RoleButton({ title, subtitle, icon, onPress, primary = false, disabled = false }: RoleButtonProps) {
   return (
     <Pressable
       accessibilityRole="button"
+      accessibilityState={{ disabled }}
       accessibilityLabel={`${title}. ${subtitle}`}
       onPress={onPress}
+      disabled={disabled}
       style={({ pressed }) => [
         styles.roleButton,
         primary ? styles.primaryButton : styles.secondaryButton,
         pressed && styles.pressed,
+        disabled && styles.disabled,
       ]}>
       <Text style={styles.roleIcon} accessibilityElementsHidden>
         {icon}
@@ -241,4 +264,6 @@ const styles = StyleSheet.create({
   primaryButtonSubtext: { color: '#E5F2E8' },
   chevron: { color: colors.green, fontSize: 25, lineHeight: 28, marginLeft: 8 },
   footerNote: { color: colors.muted, fontSize: 10, textAlign: 'center', marginTop: 15 },
+  restoringNote: { color: colors.blue, fontSize: 12, marginTop: 8 },
+  disabled: { opacity: 0.55 },
 });

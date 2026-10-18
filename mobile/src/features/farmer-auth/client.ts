@@ -1,0 +1,219 @@
+import { Platform } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
+
+const SESSION_KEY = 'karavali-fresh.farmer.session.v1';
+const REGISTERED_KEY = 'karavali-fresh.farmer.registered.v1';
+const API_BASE = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
+
+type SessionTokens = { accessToken: string; refreshToken?: string };
+type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'testModeDisabled' | 'network' | 'rejected' | 'exists' | 'documentMismatch' | 'documentUnreadable' | 'otpNotConfigured' | 'ocrUnavailable' | 'farmerNotFound';
+export class FarmerAuthError extends Error {
+  constructor(readonly code: ApiErrorCode) { super(code); }
+}
+
+function apiUrl(path: string) {
+  if (!API_BASE) throw new FarmerAuthError('apiUrlMissing');
+  let parsed: URL;
+  try { parsed = new URL(API_BASE); } catch { throw new FarmerAuthError('urlNotAllowed'); }
+  const host = parsed.hostname.replace(/^\[|\]$/g, '');
+  const localHost = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  const privateLanHost = /^10(?:\.\d{1,3}){3}$/.test(host) || /^192\.168(?:\.\d{1,3}){2}$/.test(host) || /^172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}$/.test(host);
+  const isAllowedDevHttp = __DEV__ && parsed.protocol === 'http:' && (localHost || privateLanHost);
+  if (parsed.protocol !== 'https:' && !isAllowedDevHttp) throw new FarmerAuthError('urlNotAllowed');
+  return `${API_BASE}${path}`;
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const url = apiUrl(path);
+  let response: Response;
+  try {
+    response = await fetch(url, init);
+  } catch (error) {
+    if (error instanceof FarmerAuthError) throw error;
+    throw new FarmerAuthError('network');
+  }
+  if (!response.ok) {
+    if (response.status === 422 || response.status === 503 || response.status === 404) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      if (body.error === 'document_mismatch') throw new FarmerAuthError('documentMismatch');
+      if (body.error === 'document_unreadable') throw new FarmerAuthError('documentUnreadable');
+      if (body.error === 'otp_provider_not_configured') throw new FarmerAuthError('otpNotConfigured');
+      if (body.error === 'ocr_engine_not_configured') throw new FarmerAuthError('ocrUnavailable');
+      if (body.error === 'farmer_not_found') throw new FarmerAuthError('farmerNotFound');
+    }
+    throw new FarmerAuthError(response.status === 404 || response.status === 503 ? 'unavailable' : response.status === 409 ? 'exists' : 'rejected');
+  }
+  if (response.status === 204) return undefined as T;
+  return response.json() as Promise<T>;
+}
+
+async function readTokens(): Promise<SessionTokens | null> {
+  if (Platform.OS === 'web') return null;
+  const stored = await SecureStore.getItemAsync(SESSION_KEY);
+  if (!stored) return null;
+  try {
+    const parsed = JSON.parse(stored) as SessionTokens;
+    return parsed.accessToken ? parsed : null;
+  } catch {
+    await SecureStore.deleteItemAsync(SESSION_KEY);
+    return null;
+  }
+}
+
+export async function hasStoredFarmerSession() {
+  return (await readTokens()) !== null;
+}
+
+async function saveTokens(tokens: SessionTokens) {
+  if (Platform.OS === 'web') throw new FarmerAuthError('unavailable');
+  await SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(tokens));
+}
+
+async function clearTokens() {
+  if (Platform.OS !== 'web') await SecureStore.deleteItemAsync(SESSION_KEY);
+}
+
+export async function hasRegisteredFarmerMarker() {
+  return Platform.OS !== 'web' && (await SecureStore.getItemAsync(REGISTERED_KEY)) === '1';
+}
+
+export async function markFarmerRegistered() {
+  if (Platform.OS !== 'web') await SecureStore.setItemAsync(REGISTERED_KEY, '1');
+}
+
+export async function clearFarmerRegisteredMarker() {
+  if (Platform.OS !== 'web') await SecureStore.deleteItemAsync(REGISTERED_KEY);
+}
+
+export type FarmerCapabilities = {
+  registrationEnabled: boolean;
+  otpLoginEnabled: boolean;
+  documentComparisonEnabled: boolean;
+  ocrEngineConfigured: boolean;
+  otpDeliveryConfigured: boolean;
+  ocrEngineName: string;
+  privacyNoticeVersion: string | null;
+  privacyNotice: Partial<Record<'en' | 'kn' | 'tcy', string>>;
+};
+export type FarmerRegistration = { fullName: string; age: string; gender: string; phone: string; aadhaar: string; address: string };
+export type FarmerOcrTestInput = { fullName: string; dateOfBirth: string; gender: 'male' | 'female' | 'other'; address: string };
+export type FarmerOcrTestResult = {
+  status: 'match' | 'mismatch' | 'unreadable';
+  extracted: { fullName: string | null; dateOfBirth: string | null; gender: 'male' | 'female' | 'other' | null; address: string | null };
+  comparisons: Record<'fullName' | 'dateOfBirth' | 'gender' | 'address', 'match' | 'mismatch' | 'unreadable'>;
+  issues?: string[];
+};
+
+/** Uses the existing registration URL in explicitly enabled development OCR-test mode. No auth token is sent. */
+export async function runFarmerOcrTest(data: FarmerOcrTestInput, imageUri: string, imageType: string, imageName: string): Promise<FarmerOcrTestResult> {
+  const body = new FormData();
+  body.append('mode', 'ocr-test');
+  body.append('fullName', data.fullName.trim());
+  body.append('dateOfBirth', data.dateOfBirth);
+  body.append('gender', data.gender);
+  body.append('address', data.address.trim());
+  if (Platform.OS === 'web') {
+    let imageResponse: Response;
+    try { imageResponse = await fetch(imageUri); } catch { throw new FarmerAuthError('rejected'); }
+    if (!imageResponse.ok) throw new FarmerAuthError('rejected');
+    body.append('document', await imageResponse.blob(), imageName || 'ocr-test-image');
+  } else {
+    body.append('document', { uri: imageUri, name: imageName || 'ocr-test-image', type: imageType } as never);
+  }
+  let response: Response;
+  try { response = await fetch(apiUrl('/api/farmer/registrations'), { method: 'POST', body }); }
+  catch (error) { if (error instanceof FarmerAuthError) throw error; throw new FarmerAuthError('network'); }
+  const payload = await response.json().catch(() => null) as FarmerOcrTestResult | { error?: string } | null;
+  if (payload && 'status' in payload && ['match', 'mismatch', 'unreadable'].includes(payload.status)) return payload as FarmerOcrTestResult;
+  if (payload && 'error' in payload) {
+    if (payload.error === 'route_not_found') throw new FarmerAuthError('testModeDisabled');
+    if (payload.error === 'ocr_engine_not_configured' || payload.error === 'ocr_engine_unavailable') throw new FarmerAuthError('ocrUnavailable');
+    if (payload.error === 'document_required' || payload.error === 'invalid_document') throw new FarmerAuthError('rejected');
+  }
+  throw new FarmerAuthError('rejected');
+}
+
+export async function getFarmerCapabilities() {
+  return request<FarmerCapabilities>('/api/farmer/auth/capabilities');
+}
+
+export async function hasValidFarmerSession(): Promise<boolean> {
+  const tokens = await readTokens();
+  if (!tokens) return false;
+  try {
+    const result = await request<{ valid: boolean }>('/api/farmer/auth/session', {
+      headers: { Authorization: `Bearer ${tokens.accessToken}` },
+    });
+    if (result.valid) return true;
+    await clearTokens();
+    return false;
+  } catch (error) {
+    // Unreachable service cannot validate the session; rejected/expired tokens are discarded.
+    if (error instanceof FarmerAuthError && ['network', 'unavailable'].includes(error.code)) return false;
+    await clearTokens();
+    return false;
+  }
+}
+
+export async function submitFarmerRegistration(data: FarmerRegistration, imageUri: string, imageType: string, privacyNoticeVersion: string) {
+  const body = new FormData();
+  body.append('fullName', data.fullName);
+  body.append('age', data.age);
+  body.append('gender', data.gender);
+  body.append('phone', data.phone);
+  body.append('aadhaar', data.aadhaar);
+  body.append('address', data.address);
+  body.append('consent', 'true');
+  body.append('privacyNoticeVersion', privacyNoticeVersion);
+  body.append('document', { uri: imageUri, name: 'identity-document', type: imageType } as never);
+  const result = await request<{
+    status: 'pending' | 'failed';
+    documentComparison: 'pending' | 'passed' | 'failed';
+    verificationId: string;
+  }>('/api/farmer/registrations', { method: 'POST', body });
+  if (!result.verificationId || !['pending', 'failed'].includes(result.status) ||
+      !['pending', 'passed', 'failed'].includes(result.documentComparison)) {
+    throw new FarmerAuthError('rejected');
+  }
+  return result;
+}
+
+export async function getVerificationStatus(verificationId: string) {
+  return request<{
+    status: 'pending' | 'failed';
+    documentComparison: 'pending' | 'passed' | 'failed';
+  }>(
+    `/api/farmer/registrations/${encodeURIComponent(verificationId)}/verification`
+  );
+}
+
+export async function requestFarmerRegistrationOtp(verificationId: string) {
+  return request<{ challengeId: string }>(`/api/farmer/registrations/${encodeURIComponent(verificationId)}/otp`, {
+    method: 'POST',
+  });
+}
+
+export async function requestFarmerOtp(phone: string) {
+  return request<{ challengeId: string }>('/api/farmer/auth/otp/request', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone }),
+  });
+}
+
+export async function verifyFarmerOtp(challengeId: string, otp: string) {
+  const tokens = await request<SessionTokens>('/api/farmer/auth/otp/verify', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ challengeId, otp }),
+  });
+  if (!tokens.accessToken) throw new FarmerAuthError('rejected');
+  await saveTokens(tokens);
+}
+
+export async function logoutFarmer() {
+  const tokens = await readTokens();
+  try {
+    if (tokens) await request('/api/farmer/auth/logout', {
+      method: 'POST', headers: { Authorization: `Bearer ${tokens.accessToken}` },
+    });
+  } finally {
+    await clearTokens();
+  }
+}

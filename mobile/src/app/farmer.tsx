@@ -8,11 +8,13 @@ import {
   SectionHeading,
 } from '@/components/marketplace-ui';
 import { useLanguage } from '@/localization/LanguageProvider';
+import { FarmerDashboardGuard } from '@/components/farmer-auth-flow';
 
 export default function FarmerHomeScreen() {
   const { t } = useLanguage();
 
   return (
+    <FarmerDashboardGuard>
     <ScreenFrame>
       <BrandHeader role="Farmer" />
 
@@ -61,6 +63,7 @@ export default function FarmerHomeScreen() {
         />
       </View>
     </ScreenFrame>
+    </FarmerDashboardGuard>
   );
 }
 
