@@ -14,9 +14,9 @@ import {
   completeFarmerPhoneVerification,
   consentForRegistrationPhoneVerification,
   getFarmerCapabilities,
+  getFarmerSessionState,
   getFarmerPhoneVerificationStatus,
   getVerificationStatus,
-  hasValidFarmerSession,
   lookupFarmerAccount,
   logoutFarmer,
   startFarmerPhoneVerification,
@@ -25,11 +25,30 @@ import {
   type FarmerCapabilities,
   type FarmerRegistration,
 } from '@/features/farmer-auth/client';
+import { routeForFarmerAccount, routeForFarmerSession, type FarmerSessionState } from '@/features/farmer-auth/session-lifecycle';
 import { farmerAuthRuntime } from '@/features/farmer-auth/runtime';
 
 type Page = 'entry' | 'register' | 'login' | 'otp' | 'verification';
 type FormErrors = Partial<Record<keyof FarmerRegistration | 'consent' | 'phoneVerificationConsent' | 'document', TranslationKey>>;
 type Props = { page: Page };
+
+function farmerAuthErrorText(error: unknown, page: Page): TranslationKey {
+  if (!(error instanceof FarmerAuthError)) return 'farmerAuth.backendUnavailable';
+  if (error.code === 'network') return 'farmerAuth.networkError';
+  if (error.code === 'apiUrlMissing') return 'farmerAuth.apiConfigurationMissing';
+  if (error.code === 'urlNotAllowed') return 'farmerAuth.apiUrlNotAllowed';
+  if (error.code === 'configurationIncomplete') return 'farmerAuth.backendConfigurationIncomplete';
+  if (error.code === 'documentMismatch') return 'farmerAuth.documentMismatch';
+  if (error.code === 'documentUnreadable') return 'farmerAuth.documentUnreadable';
+  if (error.code === 'verificationNotConfigured') return 'farmerAuth.phoneVerificationProviderMissing';
+  if (error.code === 'verificationProviderFailure') return 'farmerAuth.phoneVerificationProviderFailure';
+  if (error.code === 'rateLimited') return 'farmerAuth.rateLimited';
+  if (error.code === 'verificationExpired') return 'farmerAuth.phoneVerificationExpired';
+  if (error.code === 'ocrUnavailable') return 'farmerAuth.providerMissing';
+  if (error.code === 'farmerNotFound') return 'farmerAuth.accountNotFound';
+  if (error.code === 'rejected') return page === 'otp' ? 'farmerAuth.phoneVerificationRejected' : 'farmerAuth.requestRejected';
+  return 'farmerAuth.backendUnavailable';
+}
 
 export function FarmerAuthFlow({ page }: Props) {
   const { language, t } = useLanguage();
@@ -38,6 +57,8 @@ export function FarmerAuthFlow({ page }: Props) {
   const [errors, setErrors] = useState<FormErrors>({});
   const [capabilities, setCapabilities] = useState<FarmerCapabilities | null>(null);
   const [loadingCapabilities, setLoadingCapabilities] = useState(true);
+  const [capabilityError, setCapabilityError] = useState<TranslationKey | null>(null);
+  const [entrySessionState, setEntrySessionState] = useState<FarmerSessionState | 'checking'>('checking');
   const [values, setValues] = useState<FarmerRegistration>(() => ({ fullName: '', age: '', gender: '', phone: farmerAuthRuntime.takePhone(), aadhaar: '', address: '' }));
   const [consented, setConsented] = useState(false);
   const [phoneVerificationConsented, setPhoneVerificationConsented] = useState(false);
@@ -59,13 +80,15 @@ export function FarmerAuthFlow({ page }: Props) {
   useEffect(() => {
     let active = true;
     if (page === 'entry') {
-      hasValidFarmerSession().then(async (valid) => {
-        if (active && valid) router.replace('/farmer');
-        else if (active) setBusy(false);
-      }).catch(() => { if (active) setBusy(false); });
+      getFarmerSessionState().then((state) => {
+        if (!active) return;
+        setEntrySessionState(state);
+        if (state === 'valid') router.replace('/farmer');
+        else setBusy(false);
+      });
     }
     getFarmerCapabilities().then((value) => { if (active) setCapabilities(value); })
-      .catch(() => { if (active) setCapabilities(null); })
+      .catch((error) => { if (active) { setCapabilities(null); setCapabilityError(farmerAuthErrorText(error, page)); } })
       .finally(() => { if (active) setLoadingCapabilities(false); });
     return () => { active = false; };
   }, [page]);
@@ -75,27 +98,29 @@ export function FarmerAuthFlow({ page }: Props) {
     setErrors((current) => ({ ...current, [field]: undefined }));
     setNotice(null);
   };
-  const errorText = useCallback((error: unknown): TranslationKey => error instanceof FarmerAuthError && error.code === 'network'
-    ? 'farmerAuth.networkError'
-    : error instanceof FarmerAuthError && error.code === 'documentMismatch'
-      ? 'farmerAuth.documentMismatch'
-      : error instanceof FarmerAuthError && error.code === 'documentUnreadable'
-        ? 'farmerAuth.documentUnreadable'
-      : error instanceof FarmerAuthError && error.code === 'verificationNotConfigured'
-        ? 'farmerAuth.phoneVerificationProviderMissing'
-        : error instanceof FarmerAuthError && error.code === 'verificationProviderFailure'
-          ? 'farmerAuth.phoneVerificationProviderFailure'
-          : error instanceof FarmerAuthError && error.code === 'rateLimited'
-            ? 'farmerAuth.rateLimited'
-            : error instanceof FarmerAuthError && error.code === 'verificationExpired'
-              ? 'farmerAuth.phoneVerificationExpired'
-        : error instanceof FarmerAuthError && error.code === 'ocrUnavailable'
-          ? 'farmerAuth.providerMissing'
-          : error instanceof FarmerAuthError && error.code === 'farmerNotFound'
-            ? 'farmerAuth.accountNotFound'
-    : error instanceof FarmerAuthError && error.code === 'rejected'
-      ? page === 'otp' ? 'farmerAuth.phoneVerificationRejected' : 'farmerAuth.requestRejected'
-      : 'farmerAuth.backendUnavailable', [page]);
+  const retryFarmerEntry = async () => {
+    setBusy(true);
+    setCapabilityError(null);
+    setLoadingCapabilities(true);
+    try {
+      const state = await getFarmerSessionState();
+      setEntrySessionState(state);
+      if (state === 'valid') { router.replace('/farmer'); return; }
+      if (routeForFarmerSession(state) === 'retry') {
+        setNotice(state === 'configuration-error' ? 'farmerAuth.apiConfigurationMissing' : 'farmerAuth.sessionUnavailable');
+      }
+      const value = await getFarmerCapabilities();
+      setCapabilities(value);
+      if (!value.sessionSigningConfigured) setNotice('farmerAuth.backendConfigurationIncomplete');
+      else setNotice(null);
+    } catch (error) {
+      setCapabilities(null);
+      setCapabilityError(farmerAuthErrorText(error, page));
+    } finally {
+      setLoadingCapabilities(false);
+      setBusy(false);
+    }
+  };
   const privacyNotice = capabilities?.privacyNotice[language as LanguageCode] ?? capabilities?.privacyNotice.en;
   const canCollectIdentity = Boolean(
     capabilities?.registrationEnabled && capabilities.documentComparisonEnabled &&
@@ -161,7 +186,7 @@ export function FarmerAuthFlow({ page }: Props) {
       setNotice(failed ? 'farmerAuth.verificationFailed' : 'farmerAuth.verificationPending');
     } catch (error) {
       if (error instanceof FarmerAuthError && error.code === 'exists') router.replace('/auth/farmer/login' as never);
-      else setNotice(errorText(error));
+      else setNotice(farmerAuthErrorText(error, page));
     } finally {
       if (documentUri?.startsWith('file://')) {
         try { new File(documentUri).delete(); } catch { /* Best-effort deletion of temporary picker output. */ }
@@ -192,7 +217,7 @@ export function FarmerAuthFlow({ page }: Props) {
       setVerificationStatus('pending');
       router.push('/auth/farmer/otp' as never);
     } catch (error) {
-      setNotice(errorText(error));
+      setNotice(farmerAuthErrorText(error, page));
     } finally { setBusy(false); }
   };
 
@@ -207,13 +232,14 @@ export function FarmerAuthFlow({ page }: Props) {
     try {
       const account = await lookupFarmerAccount(phone);
       farmerAuthRuntime.setPhone(phone);
-      if (account.accountStatus === 'registered') router.push('/auth/farmer/login' as never);
-      else if (account.accountStatus === 'pending' && account.verificationId) {
+      const destination = routeForFarmerAccount(account.accountStatus);
+      if (destination === 'login') router.push('/auth/farmer/login' as never);
+      else if (destination === 'verification' && account.verificationId) {
         farmerAuthRuntime.setVerification(account.verificationId, 'pending');
         router.push('/auth/farmer/verification' as never);
-      } else if (account.accountStatus === 'new') router.push('/auth/farmer/register' as never);
+      } else if (destination === 'register') router.push('/auth/farmer/register' as never);
       else setNotice('farmerAuth.requestRejected');
-    } catch (error) { setNotice(errorText(error)); }
+    } catch (error) { setNotice(farmerAuthErrorText(error, page)); }
     finally { setBusy(false); }
   };
 
@@ -242,7 +268,7 @@ export function FarmerAuthFlow({ page }: Props) {
         farmerAuthRuntime.setVerification(id, 'pending');
         setNotice('farmerAuth.verificationPending');
       } else setNotice('farmerAuth.verificationFailed');
-    } catch (error) { setNotice(errorText(error)); }
+    } catch (error) { setNotice(farmerAuthErrorText(error, page)); }
     finally { setBusy(false); }
   };
 
@@ -254,7 +280,7 @@ export function FarmerAuthFlow({ page }: Props) {
       await consentForRegistrationPhoneVerification(id);
       setPhoneVerificationConsentRequired(false);
       await checkVerification();
-    } catch (error) { setNotice(errorText(error)); }
+    } catch (error) { setNotice(farmerAuthErrorText(error, page)); }
     finally { setBusy(false); }
   };
 
@@ -271,15 +297,16 @@ export function FarmerAuthFlow({ page }: Props) {
     setBusy(true);
     try {
       await completeFarmerPhoneVerification(challengeId);
-      if (await hasValidFarmerSession()) {
+      const sessionState = await getFarmerSessionState();
+      if (sessionState === 'valid' || sessionState === 'unavailable' || sessionState === 'configuration-error') {
         farmerAuthRuntime.clearRegistrationOtp();
         farmerAuthRuntime.clearPhoneVerification();
         farmerAuthRuntime.clearVerification();
         router.replace('/farmer');
       } else setNotice('farmerAuth.sessionInvalid');
-    } catch (error) { setNotice(errorText(error)); }
+    } catch (error) { setNotice(farmerAuthErrorText(error, page)); }
     finally { finishingVerificationRef.current = false; setBusy(false); }
-  }, [errorText]);
+  }, [page]);
 
   const retryPhoneVerification = async () => {
     setBusy(true);
@@ -292,7 +319,7 @@ export function FarmerAuthFlow({ page }: Props) {
         : await startFarmerPhoneVerification(farmerAuthRuntime.getPhone());
       farmerAuthRuntime.setPhoneVerification(challenge);
       setVerificationStatus('pending');
-    } catch (error) { setNotice(errorText(error)); }
+    } catch (error) { setNotice(farmerAuthErrorText(error, page)); }
     finally { setBusy(false); }
   };
 
@@ -327,12 +354,12 @@ export function FarmerAuthFlow({ page }: Props) {
         setVerificationStatus(result.status);
         if (result.status === 'verified') { await finishVerified(challenge.challengeId); return; }
         if (result.status === 'expired' || result.status === 'cancelled') return;
-      } catch (error) { if (active) setNotice(errorText(error)); }
+      } catch (error) { if (active) setNotice(farmerAuthErrorText(error, page)); }
       if (active) timer = setTimeout(() => { void poll(); }, 2500);
     };
     void poll();
     return () => { active = false; if (timer) clearTimeout(timer); };
-  }, [page, verificationStatus, errorText, finishVerified]));
+  }, [page, verificationStatus, finishVerified]));
 
   const field = (name: keyof FarmerRegistration, labelKey: TranslationKey, placeholderKey: TranslationKey, options: { keyboard?: 'default' | 'number-pad'; secure?: boolean; maxLength?: number } = {}) => (
     <View style={styles.field} key={name}>
@@ -374,9 +401,28 @@ export function FarmerAuthFlow({ page }: Props) {
       <Text style={styles.intro}>{t('farmerAuth.entryIntro')}</Text>
       {banner}
       {loadingCapabilities || busy ? <Text style={styles.notice}>{t('farmerAuth.checkingSession')}</Text> : null}
-      {!loadingCapabilities && !capabilities?.registrationEnabled ? <Text style={styles.warning}>{t('farmerAuth.backendUnavailable')}</Text> : null}
-      {field('phone', 'farmerAuth.phone', 'farmerAuth.phonePlaceholder', { keyboard: 'number-pad', maxLength: 10 })}
-      {noticeView}{button('farmerAuth.continue', continueFromEntry, loadingCapabilities)}
+      {!loadingCapabilities && !capabilityError && capabilities?.sessionSigningConfigured !== false && (entrySessionState === 'unavailable' || entrySessionState === 'configuration-error') ? <View style={styles.providerDisclosure}>
+        <Text accessibilityRole="alert" style={styles.warningText}>{t(entrySessionState === 'configuration-error' ? 'farmerAuth.apiConfigurationMissing' : 'farmerAuth.sessionUnavailable')}</Text>
+        {button('farmerAuth.retrySession', retryFarmerEntry)}
+      </View> : null}
+      {!loadingCapabilities && capabilityError ? <View style={styles.providerDisclosure}>
+        <Text accessibilityRole="alert" style={styles.warningText}>{t(capabilityError)}</Text>
+        {button('farmerAuth.retrySession', retryFarmerEntry)}
+      </View> : null}
+      {!loadingCapabilities && !capabilityError && capabilities && !capabilities.sessionSigningConfigured ? <View style={styles.providerDisclosure}>
+        <Text accessibilityRole="alert" style={styles.warningText}>{t('farmerAuth.backendConfigurationIncomplete')}</Text>
+        {capabilities.missingConfiguration?.length ? <Text selectable style={styles.help}>{capabilities.missingConfiguration.join(', ')}</Text> : null}
+        {button('farmerAuth.retrySession', retryFarmerEntry)}
+      </View> : null}
+      {!loadingCapabilities && !capabilityError && capabilities?.sessionSigningConfigured && !capabilities.phoneVerificationConfigured ? <View style={styles.providerDisclosure}>
+        <Text accessibilityRole="alert" style={styles.warningText}>{t('farmerAuth.phoneVerificationProviderMissing')}</Text>
+        {capabilities.missingConfiguration?.length ? <Text selectable style={styles.help}>{capabilities.missingConfiguration.join(', ')}</Text> : null}
+        {button('farmerAuth.retrySession', retryFarmerEntry)}
+      </View> : null}
+      {!loadingCapabilities && !capabilityError && capabilities?.sessionSigningConfigured && capabilities.phoneVerificationConfigured && (entrySessionState === 'missing' || entrySessionState === 'invalid') ? <>
+        {field('phone', 'farmerAuth.phone', 'farmerAuth.phonePlaceholder', { keyboard: 'number-pad', maxLength: 10 })}
+        {noticeView}{button('farmerAuth.continue', continueFromEntry)}
+      </> : null}
     </View> : null}
 
     {page === 'register' ? <View style={styles.card}>
@@ -452,12 +498,35 @@ export function FarmerAuthFlow({ page }: Props) {
 
 export function FarmerDashboardGuard({ children }: { children: ReactNode }) {
   const { t } = useLanguage();
-  const [valid, setValid] = useState<boolean | null>(null);
+  const [sessionState, setSessionState] = useState<FarmerSessionState | 'checking'>('checking');
   const [busy, setBusy] = useState(false);
-  useEffect(() => { hasValidFarmerSession().then(setValid).catch(() => setValid(false)); }, []);
-  useEffect(() => { if (valid === false) router.replace('/auth/farmer'); }, [valid]);
-  if (valid !== true) return <ScreenFrame><Text style={styles.notice}>{t('farmerAuth.checkingSession')}</Text></ScreenFrame>;
-  return <View style={styles.gate}><View style={styles.logoutBar}><Pressable accessibilityRole="button" disabled={busy} onPress={async () => { setBusy(true); try { await logoutFarmer(); } catch { /* Local credentials are cleared even when service logout is unavailable. */ } finally { router.dismissAll(); router.replace('/auth/farmer'); } }} style={styles.logoutButton}><Text style={styles.linkText}>{t(busy ? 'farmerAuth.loading' : 'farmerAuth.logout')}</Text></Pressable></View>{children}</View>;
+  const [logoutError, setLogoutError] = useState(false);
+  const restore = useCallback(async () => {
+    const state = await getFarmerSessionState();
+    setSessionState(state);
+    const destination = routeForFarmerSession(state);
+    if (destination === 'authentication') router.replace('/auth/farmer');
+  }, []);
+  useEffect(() => {
+    const timer = setTimeout(() => { void restore(); }, 0);
+    return () => clearTimeout(timer);
+  }, [restore]);
+  if (sessionState === 'checking') return <ScreenFrame><Text style={styles.notice}>{t('farmerAuth.checkingSession')}</Text></ScreenFrame>;
+  if (sessionState !== 'valid') return <ScreenFrame>
+    <View style={styles.card}>
+      <Text accessibilityRole="alert" style={styles.notice}>{t(sessionState === 'invalid' || sessionState === 'missing' ? 'farmerAuth.sessionInvalid' : sessionState === 'configuration-error' ? 'farmerAuth.apiConfigurationMissing' : 'farmerAuth.sessionUnavailable')}</Text>
+      <Pressable accessibilityRole="button" disabled={busy} onPress={() => { setBusy(true); void restore().finally(() => setBusy(false)); }} style={styles.primaryButton}><Text style={styles.primaryButtonText}>{t(busy ? 'farmerAuth.loading' : 'farmerAuth.retrySession')}</Text></Pressable>
+    </View>
+  </ScreenFrame>;
+  return <View style={styles.gate}><View style={styles.logoutBar}>
+    {logoutError ? <Text accessibilityRole="alert" style={styles.error}>{t('farmerAuth.logoutFailed')}</Text> : null}
+    <Pressable accessibilityRole="button" disabled={busy} onPress={async () => {
+      setBusy(true); setLogoutError(false);
+      try { await logoutFarmer(); router.dismissAll(); router.replace('/auth/farmer'); }
+      catch { setLogoutError(true); }
+      finally { setBusy(false); }
+    }} style={styles.logoutButton}><Text style={styles.linkText}>{t(busy ? 'farmerAuth.loading' : 'farmerAuth.logout')}</Text></Pressable>
+  </View>{children}</View>;
 }
 
 const styles = StyleSheet.create({
@@ -465,7 +534,7 @@ const styles = StyleSheet.create({
   back: { minHeight: 42, justifyContent: 'center', paddingHorizontal: 8 }, backText: { color: MarketColors.green, fontSize: 14, fontWeight: '700' },
   brand: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 18 }, brandMark: { width: 43, height: 43, borderRadius: 15, backgroundColor: MarketColors.green, alignItems: 'center', justifyContent: 'center' }, brandGlyph: { color: '#fff', fontSize: 26, lineHeight: 30 }, brandName: { color: MarketColors.text, fontSize: 17, fontWeight: '800' }, brandRegion: { color: MarketColors.muted, fontSize: 9, fontWeight: '700', letterSpacing: 1.1, marginTop: 2 },
   card: { backgroundColor: MarketColors.card, borderRadius: 22, borderWidth: 1, borderColor: MarketColors.border, padding: 20, gap: 12 }, eyebrow: { color: MarketColors.blue, fontSize: 11, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 1 }, title: { color: MarketColors.text, fontSize: 25, fontWeight: '800' }, intro: { color: MarketColors.muted, fontSize: 14, lineHeight: 20 }, demoBanner: { borderRadius: 13, backgroundColor: MarketColors.blueSoft, padding: 12 }, demoText: { color: MarketColors.blue, fontSize: 12, lineHeight: 18, fontWeight: '600' },
-  field: { gap: 6 }, label: { color: MarketColors.text, fontSize: 13, fontWeight: '700' }, input: { minHeight: 48, borderWidth: 1, borderColor: MarketColors.border, borderRadius: 12, backgroundColor: MarketColors.background, paddingHorizontal: 12, color: MarketColors.text, fontSize: 14 }, help: { color: MarketColors.muted, fontSize: 11, lineHeight: 16 }, error: { color: '#B42318', fontSize: 12 }, notice: { color: MarketColors.blue, fontSize: 13, lineHeight: 19 }, warning: { color: '#8A5A00', backgroundColor: '#FFF4D6', borderRadius: 12, padding: 11, fontSize: 12, lineHeight: 18 }, devNote: { color: MarketColors.muted, fontSize: 11, lineHeight: 16 },
+  field: { gap: 6 }, label: { color: MarketColors.text, fontSize: 13, fontWeight: '700' }, input: { minHeight: 48, borderWidth: 1, borderColor: MarketColors.border, borderRadius: 12, backgroundColor: MarketColors.background, paddingHorizontal: 12, color: MarketColors.text, fontSize: 14 }, help: { color: MarketColors.muted, fontSize: 11, lineHeight: 16 }, error: { color: '#B42318', fontSize: 12 }, notice: { color: MarketColors.blue, fontSize: 13, lineHeight: 19 }, warning: { color: '#8A5A00', backgroundColor: '#FFF4D6', borderRadius: 12, padding: 11, fontSize: 12, lineHeight: 18 }, warningText: { color: '#8A5A00', fontSize: 12, lineHeight: 18 }, devNote: { color: MarketColors.muted, fontSize: 11, lineHeight: 16 },
   phoneInputRow: { flexDirection: 'row', gap: 8 }, countryPrefix: { minHeight: 48, minWidth: 60, justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: MarketColors.border, borderRadius: 12, backgroundColor: MarketColors.background }, countryPrefixText: { color: MarketColors.text, fontSize: 14, fontWeight: '700' }, phoneInput: { flex: 1 },
   genderRow: { flexDirection: 'row', gap: 7 }, genderOption: { flex: 1, minHeight: 42, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: MarketColors.border, borderRadius: 12, paddingHorizontal: 5 }, genderSelected: { backgroundColor: MarketColors.greenSoft, borderColor: MarketColors.green }, genderText: { color: MarketColors.text, fontSize: 12, fontWeight: '600' },
   consentRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, paddingVertical: 4 }, checkbox: { width: 22, height: 22, borderRadius: 6, borderWidth: 1, borderColor: MarketColors.green, alignItems: 'center', justifyContent: 'center' }, checkboxChecked: { backgroundColor: MarketColors.green }, checkmark: { color: '#fff', fontSize: 15, fontWeight: '800' }, consentText: { flex: 1, color: MarketColors.text, fontSize: 12, lineHeight: 18 },

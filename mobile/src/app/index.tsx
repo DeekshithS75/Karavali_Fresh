@@ -6,7 +6,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { LanguageSelector } from '@/components/language-selector';
 import { useLanguage } from '@/localization/LanguageProvider';
-import { hasStoredFarmerSession, hasValidFarmerSession } from '@/features/farmer-auth/client';
+import { getFarmerSessionState } from '@/features/farmer-auth/client';
+import type { FarmerSessionState } from '@/features/farmer-auth/session-lifecycle';
 
 const colors = {
   green: '#287A49',
@@ -25,18 +26,25 @@ export default function WelcomeScreen() {
   const { width } = useWindowDimensions();
   const compact = width < 390;
   const { t } = useLanguage();
-  const [restoringFarmer, setRestoringFarmer] = useState(false);
+  const [restoringFarmer, setRestoringFarmer] = useState(true);
+  const [sessionState, setSessionState] = useState<FarmerSessionState>('missing');
+
+  const retrySessionRestore = async () => {
+    setRestoringFarmer(true);
+    const state = await getFarmerSessionState();
+    setSessionState(state);
+    setRestoringFarmer(false);
+    if (state === 'valid') router.replace('/farmer');
+  };
 
   useEffect(() => {
     let active = true;
-    hasStoredFarmerSession().then(async (hasSession) => {
-      if (!active || !hasSession) return;
-      setRestoringFarmer(true);
-      const valid = await hasValidFarmerSession();
+    getFarmerSessionState().then((state) => {
       if (!active) return;
-      if (valid) router.replace('/farmer');
-      else setRestoringFarmer(false);
-    }).catch(() => { if (active) setRestoringFarmer(false); });
+      setSessionState(state);
+      setRestoringFarmer(false);
+      if (state === 'valid') router.replace('/farmer');
+    });
     return () => { active = false; };
   }, []);
 
@@ -88,6 +96,10 @@ export default function WelcomeScreen() {
             <Text style={styles.actionTitle}>{t('welcome.joinTitle')}</Text>
             <Text style={styles.actionSubtitle}>{t('welcome.joinDescription')}</Text>
             {restoringFarmer ? <Text accessibilityRole="alert" style={styles.restoringNote}>{t('farmerAuth.checkingSession')}</Text> : null}
+            {!restoringFarmer && (sessionState === 'unavailable' || sessionState === 'configuration-error') ? <View style={styles.sessionIssue}>
+              <Text accessibilityRole="alert" style={styles.restoringNote}>{t(sessionState === 'configuration-error' ? 'farmerAuth.apiConfigurationMissing' : 'farmerAuth.sessionUnavailable')}</Text>
+              <Pressable accessibilityRole="button" onPress={() => void retrySessionRestore()} style={styles.sessionRetry}><Text style={styles.sessionRetryText}>{t('farmerAuth.retrySession')}</Text></Pressable>
+            </View> : null}
 
             <RoleButton
               title={t('welcome.farmerButton')}
@@ -265,5 +277,8 @@ const styles = StyleSheet.create({
   chevron: { color: colors.green, fontSize: 25, lineHeight: 28, marginLeft: 8 },
   footerNote: { color: colors.muted, fontSize: 10, textAlign: 'center', marginTop: 15 },
   restoringNote: { color: colors.blue, fontSize: 12, marginTop: 8 },
+  sessionIssue: { borderRadius: 12, backgroundColor: '#FFF4D6', padding: 12, gap: 8, marginTop: 8 },
+  sessionRetry: { minHeight: 38, alignSelf: 'flex-start', justifyContent: 'center', paddingHorizontal: 12, borderRadius: 10, backgroundColor: colors.green },
+  sessionRetryText: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
   disabled: { opacity: 0.55 },
 });

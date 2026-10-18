@@ -78,14 +78,25 @@ app.get('/health', (_request, response) => response.json({ status: 'ok' }));
 app.get('/api/farmer/auth/capabilities', (_request, response) => {
   const ocrReady = isOcrConfigured();
   const phoneVerificationReady = isPhoneVerificationConfigured();
-  const secretsReady = areSessionSecretsConfigured() && isRegistrationEncryptionConfigured();
+  const sessionSigningReady = areSessionSecretsConfigured();
+  const registrationEncryptionReady = isRegistrationEncryptionConfigured();
+  const missingConfiguration = [
+    ...(!sessionSigningReady ? ['TOKEN_HMAC_SECRET'] : []),
+    ...(!config.PHONE_HASH_SECRET || config.PHONE_HASH_SECRET.length < 32 || config.PHONE_HASH_SECRET.startsWith('replace-') ? ['PHONE_HASH_SECRET'] : []),
+    ...(!config.AADHAAR_HASH_SECRET || config.AADHAAR_HASH_SECRET.length < 32 || config.AADHAAR_HASH_SECRET.startsWith('replace-') ? ['AADHAAR_HASH_SECRET'] : []),
+    ...(!config.AADHAAR_ENCRYPTION_KEY_BASE64 || Buffer.from(config.AADHAAR_ENCRYPTION_KEY_BASE64, 'base64').length !== 32 ? ['AADHAAR_ENCRYPTION_KEY_BASE64'] : []),
+    ...(!config.NACALLER_KEY || config.NACALLER_KEY.length < 16 || config.NACALLER_KEY.startsWith('replace-') ? ['NACALLER_KEY'] : []),
+  ];
   const privacyNotice = { en: config.PRIVACY_NOTICE_EN, kn: config.PRIVACY_NOTICE_KN, tcy: config.PRIVACY_NOTICE_TCY || config.PRIVACY_NOTICE_EN };
   response.json({
-    registrationEnabled: ocrReady && secretsReady,
-    phoneVerificationEnabled: phoneVerificationReady && areSessionSecretsConfigured(),
+    registrationEnabled: ocrReady && sessionSigningReady && registrationEncryptionReady,
+    phoneVerificationEnabled: phoneVerificationReady && sessionSigningReady,
     documentComparisonEnabled: ocrReady,
     ocrEngineConfigured: ocrReady,
     phoneVerificationConfigured: phoneVerificationReady,
+    sessionSigningConfigured: sessionSigningReady,
+    registrationEncryptionConfigured: registrationEncryptionReady,
+    missingConfiguration,
     ocrEngineName: ocrReady ? OCR_ENGINE_NAME : '',
     privacyNoticeVersion: config.PRIVACY_NOTICE_VERSION,
     privacyNotice,

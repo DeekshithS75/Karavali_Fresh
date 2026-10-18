@@ -1,11 +1,13 @@
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { restoreFarmerSession, revokeFarmerSession, type FarmerSessionState } from './session-lifecycle';
 
 const SESSION_KEY = 'karavali-fresh.farmer.session.v1';
 const API_BASE = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 
 type SessionTokens = { accessToken: string; refreshToken?: string };
-type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'testModeDisabled' | 'network' | 'rejected' | 'exists' | 'documentMismatch' | 'documentUnreadable' | 'verificationNotConfigured' | 'verificationProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound' | 'verificationExpired';
+type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'testModeDisabled' | 'network' | 'unauthorized' | 'rejected' | 'exists' | 'documentMismatch' | 'documentUnreadable' | 'verificationNotConfigured' | 'verificationProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound' | 'verificationExpired' | 'configurationIncomplete';
 export class FarmerAuthError extends Error {
   constructor(readonly code: ApiErrorCode) { super(code); }
 }
@@ -32,6 +34,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new FarmerAuthError('network');
   }
   if (!response.ok) {
+    if (response.status === 401) throw new FarmerAuthError('unauthorized');
     if ([422, 429, 503, 404].includes(response.status)) {
       const body = await response.json().catch(() => ({})) as { error?: string };
       if (body.error === 'document_mismatch') throw new FarmerAuthError('documentMismatch');
@@ -50,14 +53,19 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 async function readTokens(): Promise<SessionTokens | null> {
-  if (Platform.OS === 'web') return null;
-  const stored = await SecureStore.getItemAsync(SESSION_KEY);
+  const stored = Platform.OS === 'web'
+    ? await AsyncStorage.getItem(SESSION_KEY)
+    : await SecureStore.getItemAsync(SESSION_KEY);
   if (!stored) return null;
   try {
     const parsed = JSON.parse(stored) as SessionTokens;
-    return parsed.accessToken ? parsed : null;
+    if (typeof parsed.accessToken === 'string' && parsed.accessToken.length > 0) return parsed;
+    if (Platform.OS === 'web') await AsyncStorage.removeItem(SESSION_KEY);
+    else await SecureStore.deleteItemAsync(SESSION_KEY);
+    return null;
   } catch {
-    await SecureStore.deleteItemAsync(SESSION_KEY);
+    if (Platform.OS === 'web') await AsyncStorage.removeItem(SESSION_KEY);
+    else await SecureStore.deleteItemAsync(SESSION_KEY);
     return null;
   }
 }
@@ -67,12 +75,14 @@ export async function hasStoredFarmerSession() {
 }
 
 async function saveTokens(tokens: SessionTokens) {
-  if (Platform.OS === 'web') throw new FarmerAuthError('unavailable');
-  await SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(tokens));
+  const serialized = JSON.stringify(tokens);
+  if (Platform.OS === 'web') await AsyncStorage.setItem(SESSION_KEY, serialized);
+  else await SecureStore.setItemAsync(SESSION_KEY, serialized);
 }
 
 async function clearTokens() {
-  if (Platform.OS !== 'web') await SecureStore.deleteItemAsync(SESSION_KEY);
+  if (Platform.OS === 'web') await AsyncStorage.removeItem(SESSION_KEY);
+  else await SecureStore.deleteItemAsync(SESSION_KEY);
 }
 
 export type FarmerCapabilities = {
@@ -81,6 +91,9 @@ export type FarmerCapabilities = {
   documentComparisonEnabled: boolean;
   ocrEngineConfigured: boolean;
   phoneVerificationConfigured: boolean;
+  sessionSigningConfigured?: boolean;
+  registrationEncryptionConfigured?: boolean;
+  missingConfiguration: string[];
   ocrEngineName: string;
   privacyNoticeVersion: string | null;
   privacyNotice: Partial<Record<'en' | 'kn' | 'tcy', string>>;
@@ -133,22 +146,24 @@ export async function lookupFarmerAccount(phone: string) {
   });
 }
 
+export async function getFarmerSessionState(): Promise<FarmerSessionState> {
+  const state = await restoreFarmerSession(
+    readTokens,
+    async (accessToken) => {
+      const result = await request<{ valid: boolean }>('/api/farmer/auth/session', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      return result.valid;
+    },
+    clearTokens,
+    (error) => error instanceof FarmerAuthError && error.code === 'unauthorized',
+    (error) => error instanceof FarmerAuthError && ['apiUrlMissing', 'urlNotAllowed'].includes(error.code),
+  );
+  return state;
+}
+
 export async function hasValidFarmerSession(): Promise<boolean> {
-  const tokens = await readTokens();
-  if (!tokens) return false;
-  try {
-    const result = await request<{ valid: boolean }>('/api/farmer/auth/session', {
-      headers: { Authorization: `Bearer ${tokens.accessToken}` },
-    });
-    if (result.valid) return true;
-    await clearTokens();
-    return false;
-  } catch (error) {
-    // Unreachable service cannot validate the session; rejected/expired tokens are discarded.
-    if (error instanceof FarmerAuthError && ['network', 'unavailable'].includes(error.code)) return false;
-    await clearTokens();
-    return false;
-  }
+  return (await getFarmerSessionState()) === 'valid';
 }
 
 export async function submitFarmerRegistration(data: FarmerRegistration, imageUri: string, imageType: string, privacyNoticeVersion: string) {
@@ -219,12 +234,13 @@ export async function completeFarmerPhoneVerification(challengeId: string) {
 }
 
 export async function logoutFarmer() {
-  const tokens = await readTokens();
-  try {
-    if (tokens) await request('/api/farmer/auth/logout', {
-      method: 'POST', headers: { Authorization: `Bearer ${tokens.accessToken}` },
-    });
-  } finally {
-    await clearTokens();
-  }
+  await revokeFarmerSession(readTokens, async (accessToken) => {
+    try {
+      await request('/api/farmer/auth/logout', {
+        method: 'POST', headers: { Authorization: `Bearer ${accessToken}` },
+      });
+    } catch (error) {
+      if (!(error instanceof FarmerAuthError) || error.code !== 'unauthorized') throw error;
+    }
+  }, clearTokens);
 }

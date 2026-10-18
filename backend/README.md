@@ -9,6 +9,8 @@ Node.js + TypeScript + Express API for Farmer authentication only. The Expo app 
 3. Configure `NACALLER_KEY` from your NaCaller account. The key stays on the backend and is never sent to the mobile app.
 4. Run `npm install` and `npm run dev`.
 
+For browser development, the Expo preview at `http://localhost:8081` must call the backend at `http://localhost:4000` (set `EXPO_PUBLIC_API_URL` in `mobile/.env`). `MOBILE_ORIGIN` is a comma-separated allowlist; use `http://localhost:8081,http://127.0.0.1:8081` for local browser previews. The frontend and API use different ports. If the mobile app runs on a physical phone, use the development computer's reachable LAN IP for `EXPO_PUBLIC_API_URL` instead of `localhost`.
+
 `backend/.gitignore` excludes `.env` and `.env.*`, except `.env.example`. Never commit a real environment file or API key.
 
 OCR uses local Tesseract.js with installed English and Kannada trained data. Images are processed in memory. A MongoDB Atlas replica set is required because registration completion uses a transaction.
