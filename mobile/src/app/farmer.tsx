@@ -7,54 +7,56 @@ import {
   ScreenFrame,
   SectionHeading,
 } from '@/components/marketplace-ui';
+import { useLanguage } from '@/localization/LanguageProvider';
 
 export default function FarmerHomeScreen() {
+  const { t } = useLanguage();
+
   return (
     <ScreenFrame>
       <BrandHeader role="Farmer" />
 
       <View style={styles.welcomePanel}>
-        <Text style={styles.eyebrow}>YOUR FARMER SPACE</Text>
-        <Text style={styles.greeting}>Welcome, farmer 🌱</Text>
-        <Text style={styles.intro}>
-          Keep your harvest close to home. Your listings and buyer updates will appear here.
-        </Text>
+        <Text style={styles.eyebrow}>{t('farmer.eyebrow')}</Text>
+        <Text style={styles.greeting}>{t('farmer.greeting')}</Text>
+        <Text style={styles.intro}>{t('farmer.intro')}</Text>
         <Pressable
           accessibilityRole="button"
+          accessibilityLabel={t('accessibility.addProduce')}
           accessibilityState={{ disabled: true }}
           disabled
           style={styles.addButton}>
           <Text style={styles.addIcon}>＋</Text>
-          <Text style={styles.addButtonText}>Add Produce</Text>
-          <Text style={styles.comingSoon}>Coming soon</Text>
+          <Text style={styles.addButtonText}>{t('farmer.addProduce')}</Text>
+          <Text style={styles.comingSoon}>{t('farmer.comingSoon')}</Text>
         </Pressable>
       </View>
 
       <View style={styles.section}>
-        <SectionHeading title="My Listings" detail="Your produce shared with the community" />
+        <SectionHeading title={t('farmer.listings.title')} detail={t('farmer.listings.detail')} />
         <EmptyState
           icon="🌾"
-          title="No produce listed yet"
-          message="When you add produce, your active listings will show up here."
+          title={t('farmer.listings.emptyTitle')}
+          message={t('farmer.listings.emptyMessage')}
         />
       </View>
 
       <View style={styles.section}>
-        <SectionHeading title="Buyer Requests" detail="Messages and requests from local buyers" />
+        <SectionHeading title={t('farmer.requests.title')} detail={t('farmer.requests.detail')} />
         <EmptyState
           icon="💬"
-          title="No buyer requests yet"
-          message="Requests from interested buyers will appear here when available."
+          title={t('farmer.requests.emptyTitle')}
+          message={t('farmer.requests.emptyMessage')}
           tone="blue"
         />
       </View>
 
       <View style={styles.section}>
-        <SectionHeading title="Market Prices" detail="A helpful view of local market rates" />
+        <SectionHeading title={t('farmer.prices.title')} detail={t('farmer.prices.detail')} />
         <EmptyState
           icon="📊"
-          title="Price information is not available yet"
-          message="We’ll show market price updates here once verified local data is available."
+          title={t('farmer.prices.emptyTitle')}
+          message={t('farmer.prices.emptyMessage')}
           tone="blue"
         />
       </View>

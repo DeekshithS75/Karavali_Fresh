@@ -4,6 +4,9 @@ import type { ReactNode } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { LanguageSelector } from '@/components/language-selector';
+import { useLanguage } from '@/localization/LanguageProvider';
+
 export const MarketColors = {
   green: '#287A49',
   greenDark: '#1E633A',
@@ -33,26 +36,30 @@ export function ScreenFrame({ children }: ScreenFrameProps) {
 type BrandHeaderProps = { role: 'Farmer' | 'Consumer' };
 
 export function BrandHeader({ role }: BrandHeaderProps) {
+  const { t } = useLanguage();
+  const roleLabel = role === 'Farmer' ? t('farmer.role') : t('consumer.role');
+
   return (
     <View style={styles.header}>
       <View style={styles.brandRow}>
         <View style={styles.brandMark}>
-          <Text style={styles.brandLeaf} accessibilityElementsHidden>
+          <Text style={styles.brandLeaf} accessibilityLabel={t('accessibility.brandMark')}>
             ❧
           </Text>
         </View>
         <View>
-          <Text style={styles.brandName}>Karavali Fresh</Text>
-          <Text style={styles.brandRole}>{role.toUpperCase()} HOME</Text>
+          <Text style={styles.brandName}>{t('brand.name')}</Text>
+          <Text style={styles.brandRole}>{roleLabel}</Text>
         </View>
       </View>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Return to welcome screen"
+        accessibilityLabel={t('navigation.returnToWelcome')}
         onPress={() => router.replace('/')}
         style={({ pressed }) => [styles.welcomeLink, pressed && styles.pressed]}>
-        <Text style={styles.welcomeLinkText}>‹ Welcome</Text>
+        <Text style={styles.welcomeLinkText}>‹ {t('navigation.welcome')}</Text>
       </Pressable>
+      <LanguageSelector />
     </View>
   );
 }

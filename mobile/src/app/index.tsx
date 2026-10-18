@@ -3,6 +3,9 @@ import { StatusBar } from 'expo-status-bar';
 import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { LanguageSelector } from '@/components/language-selector';
+import { useLanguage } from '@/localization/LanguageProvider';
+
 const colors = {
   green: '#287A49',
   greenDark: '#1E633A',
@@ -19,6 +22,7 @@ const colors = {
 export default function WelcomeScreen() {
   const { width } = useWindowDimensions();
   const compact = width < 390;
+  const { t } = useLanguage();
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -27,61 +31,61 @@ export default function WelcomeScreen() {
         <View style={styles.content}>
           <View style={styles.brandRow}>
             <View style={styles.brandMark}>
-              <Text style={styles.brandLeaf}>❧</Text>
+              <Text style={styles.brandLeaf} accessibilityLabel={t('accessibility.brandMark')}>
+                ❧
+              </Text>
             </View>
             <View>
-              <Text style={styles.brandName}>Karavali Fresh</Text>
-              <Text style={styles.brandRegion}>COASTAL KARNATAKA</Text>
+              <Text style={styles.brandName}>{t('brand.name')}</Text>
+              <Text style={styles.brandRegion}>{t('brand.region')}</Text>
             </View>
+            <LanguageSelector />
           </View>
 
           <View style={[styles.hero, compact && styles.heroCompact]}>
             <View style={styles.heroBadge}>
               <View style={styles.badgeDot} />
-              <Text style={styles.heroBadgeText}>GROWN CLOSE. DELIVERED FRESH.</Text>
+              <Text style={styles.heroBadgeText}>{t('welcome.eyebrow')}</Text>
             </View>
             <Text style={[styles.headline, compact && styles.headlineCompact]}>
-              Good food{ '\n' }begins closer.
+              {t('welcome.headline')}
             </Text>
-            <Text style={styles.tagline}>From Coastal Farms to Your Home</Text>
-            <Text style={styles.description}>
-              A simpler way to bring coastal Karnataka’s farmers and local families together, with
-              fresh produce and fair value at every step.
-            </Text>
+            <Text style={styles.tagline}>{t('welcome.tagline')}</Text>
+            <Text style={styles.description}>{t('welcome.description')}</Text>
 
             <View style={styles.illustration}>
               <View style={styles.sun} />
               <View style={styles.fieldBack} />
               <View style={styles.fieldFront} />
               <View style={styles.produceCard}>
-                <Text style={styles.produceEmoji}>🥥</Text>
-                <Text style={styles.produceEmoji}>🥬</Text>
-                <Text style={styles.produceEmoji}>🍌</Text>
+                <Text style={styles.produceEmoji} accessibilityElementsHidden>🥥</Text>
+                <Text style={styles.produceEmoji} accessibilityElementsHidden>🥬</Text>
+                <Text style={styles.produceEmoji} accessibilityElementsHidden>🍌</Text>
               </View>
               <View style={styles.coastPill}>
-                <Text style={styles.coastPillText}>🌊  From our coast, with care</Text>
+                <Text style={styles.coastPillText}>🌊  {t('welcome.coastNote')}</Text>
               </View>
             </View>
           </View>
 
           <View style={styles.actionCard}>
-            <Text style={styles.actionTitle}>How would you like to join?</Text>
-            <Text style={styles.actionSubtitle}>Choose a space to get started.</Text>
+            <Text style={styles.actionTitle}>{t('welcome.joinTitle')}</Text>
+            <Text style={styles.actionSubtitle}>{t('welcome.joinDescription')}</Text>
 
             <RoleButton
-              title="Continue as Farmer"
-              subtitle="Share what you grow with your community"
+              title={t('welcome.farmerButton')}
+              subtitle={t('welcome.farmerSubtitle')}
               icon="🌱"
               onPress={() => router.push('/farmer')}
               primary
             />
             <RoleButton
-              title="Continue as Consumer"
-              subtitle="Discover food grown close to home"
+              title={t('welcome.consumerButton')}
+              subtitle={t('welcome.consumerSubtitle')}
               icon="🧺"
               onPress={() => router.push('/consumer')}
             />
-            <Text style={styles.footerNote}>Local roots. A fresher way forward.</Text>
+            <Text style={styles.footerNote}>{t('welcome.footer')}</Text>
           </View>
         </View>
       </ScrollView>
@@ -101,6 +105,7 @@ function RoleButton({ title, subtitle, icon, onPress, primary = false }: RoleBut
   return (
     <Pressable
       accessibilityRole="button"
+      accessibilityLabel={`${title}. ${subtitle}`}
       onPress={onPress}
       style={({ pressed }) => [
         styles.roleButton,

@@ -8,25 +8,28 @@ import {
   ScreenFrame,
   SectionHeading,
 } from '@/components/marketplace-ui';
+import { useLanguage } from '@/localization/LanguageProvider';
+import type { TranslationKey } from '@/localization/types';
 
 const categories = [
-  { label: 'Vegetables', icon: '🥬' },
-  { label: 'Fruits', icon: '🍌' },
-  { label: 'Local Produce', icon: '🥥' },
-];
+  { titleKey: 'consumer.category.vegetables', icon: '🥬' },
+  { titleKey: 'consumer.category.fruits', icon: '🍌' },
+  { titleKey: 'consumer.category.localProduce', icon: '🥥' },
+] as const;
 
 export default function ConsumerHomeScreen() {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const { t } = useLanguage();
 
   return (
     <ScreenFrame>
       <BrandHeader role="Consumer" />
 
       <View style={styles.welcomePanel}>
-        <Text style={styles.eyebrow}>FRESH FROM AROUND YOU</Text>
-        <Text style={styles.greeting}>Welcome home 🧺</Text>
-        <Text style={styles.intro}>Find a little more of the coast in the food you bring home.</Text>
+        <Text style={styles.eyebrow}>{t('consumer.eyebrow')}</Text>
+        <Text style={styles.greeting}>{t('consumer.greeting')}</Text>
+        <Text style={styles.intro}>{t('consumer.intro')}</Text>
       </View>
 
       <View style={styles.searchBox}>
@@ -34,8 +37,8 @@ export default function ConsumerHomeScreen() {
           ⌕
         </Text>
         <TextInput
-          accessibilityLabel="Search produce or farmers"
-          placeholder="Search produce or farmers"
+          accessibilityLabel={t('consumer.searchAccessibility')}
+          placeholder={t('consumer.searchPlaceholder')}
           placeholderTextColor={MarketColors.muted}
           returnKeyType="search"
           value={searchQuery}
@@ -45,16 +48,19 @@ export default function ConsumerHomeScreen() {
       </View>
 
       <View style={styles.categorySection}>
-        <SectionHeading title="Browse categories" />
+        <SectionHeading title={t('consumer.categories.title')} />
         <View style={styles.categories}>
           {categories.map((category) => {
-            const selected = selectedCategory === category.label;
+            const titleKey: TranslationKey = category.titleKey;
+            const label = t(titleKey);
+            const selected = selectedCategory === category.titleKey;
             return (
               <Pressable
-                key={category.label}
+                key={category.titleKey}
                 accessibilityRole="button"
+                accessibilityLabel={label}
                 accessibilityState={{ selected }}
-                onPress={() => setSelectedCategory(selected ? null : category.label)}
+                onPress={() => setSelectedCategory(selected ? null : category.titleKey)}
                 style={({ pressed }) => [
                   styles.categoryCard,
                   selected && styles.categorySelected,
@@ -63,9 +69,7 @@ export default function ConsumerHomeScreen() {
                 <Text style={styles.categoryIcon} accessibilityElementsHidden>
                   {category.icon}
                 </Text>
-                <Text style={[styles.categoryLabel, selected && styles.categoryLabelSelected]}>
-                  {category.label}
-                </Text>
+                <Text style={[styles.categoryLabel, selected && styles.categoryLabelSelected]}>{label}</Text>
               </Pressable>
             );
           })}
@@ -73,21 +77,21 @@ export default function ConsumerHomeScreen() {
       </View>
 
       <View style={styles.section}>
-        <SectionHeading title="Nearby Farmers" detail="Meet growers in your community" />
+        <SectionHeading title={t('consumer.farmers.title')} detail={t('consumer.farmers.detail')} />
         <EmptyState
           icon="👩🏽‍🌾"
-          title="No farmer profiles to show yet"
-          message="Local farmer profiles will appear here as they join Karavali Fresh."
+          title={t('consumer.farmers.emptyTitle')}
+          message={t('consumer.farmers.emptyMessage')}
           tone="blue"
         />
       </View>
 
       <View style={styles.section}>
-        <SectionHeading title="Fresh Produce" detail="Seasonal finds from the coast" />
+        <SectionHeading title={t('consumer.produce.title')} detail={t('consumer.produce.detail')} />
         <EmptyState
           icon="🧺"
-          title="Fresh listings are on their way"
-          message="There are no produce listings yet. Check back as local growers join in."
+          title={t('consumer.produce.emptyTitle')}
+          message={t('consumer.produce.emptyMessage')}
         />
       </View>
     </ScreenFrame>
