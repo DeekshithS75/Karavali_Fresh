@@ -14,7 +14,7 @@ const MAX_IMAGE_SIZE = 8 * 1024 * 1024;
 const photoMimeTypes = ['image/jpeg', 'image/png', 'image/webp'];
 
 type CapturedPhoto = { uri: string; mimeType?: string; fileSize?: number };
-type FormError = 'nameRequired' | 'nameTooLong' | 'quantityInvalid' | 'photoCount' | 'photoTooLarge' | 'photoInvalid' | null;
+type FormError = 'nameRequired' | 'nameTooLong' | 'quantityInvalid' | 'priceInvalid' | 'photoCount' | 'photoTooLarge' | 'photoInvalid' | null;
 
 function createSubmissionId() {
   const part = () => Math.random().toString(16).slice(2).padEnd(8, '0').slice(0, 8);
@@ -25,6 +25,7 @@ export default function FarmerAddProduceScreen() {
   const { t, language } = useLanguage();
   const [name, setName] = useState('');
   const [quantity, setQuantity] = useState('');
+  const [pricePerUnit, setPricePerUnit] = useState('');
   const [unit, setUnit] = useState<FarmerProduce['unit']>('kg');
   const [photos, setPhotos] = useState<CapturedPhoto[]>([]);
   const [cameraMessage, setCameraMessage] = useState<string | null>(null);
@@ -99,12 +100,14 @@ export default function FarmerAddProduceScreen() {
     if (name.trim().length > 120) { setFormError('nameTooLong'); return; }
     const parsedQuantity = Number(quantity);
     if (!quantity.trim() || !Number.isFinite(parsedQuantity) || parsedQuantity <= 0) { setFormError('quantityInvalid'); return; }
+    const parsedPrice = Number(pricePerUnit);
+    if (!pricePerUnit.trim() || !Number.isFinite(parsedPrice) || parsedPrice <= 0) { setFormError('priceInvalid'); return; }
     if (photos.length < 2 || photos.length > 5) { setFormError('photoCount'); return; }
     if (photos.some((photo) => photo.fileSize && photo.fileSize > MAX_IMAGE_SIZE)) { setFormError('photoTooLarge'); return; }
     if (photos.some((photo) => photo.mimeType && !photoMimeTypes.includes(photo.mimeType))) { setFormError('photoInvalid'); return; }
     setSaving(true);
     try {
-      await createFarmerProduce({ name, quantity: String(parsedQuantity), unit, photos }, submissionId.current);
+      await createFarmerProduce({ name, quantity: String(parsedQuantity), unit, pricePerUnit: String(parsedPrice), photos }, submissionId.current);
       router.replace({ pathname: '/farmer', params: { produceAdded: '1' } });
     } catch (error) {
       if (error instanceof Error && error.message === 'invalidDocument') setSubmitError('produce.uploadInvalid');
@@ -151,6 +154,17 @@ export default function FarmerAddProduceScreen() {
           </View>
         </View>
 
+        <View style={styles.field}>
+          <Text style={styles.label}>{t('produce.sellingPrice')} *</Text>
+          <View style={styles.priceRow}>
+            <Text style={styles.currencyPrefix}>₹</Text>
+            <TextInput editable={!saving} value={pricePerUnit} onChangeText={(value) => { setPricePerUnit(value.replace(/[^\d.]/g, '')); setFormError(null); submissionId.current = createSubmissionId(); }} keyboardType="decimal-pad" inputMode="decimal" accessibilityLabel={`${t('produce.sellingPrice')} ${t(`produce.priceUnit.${unit}` as Parameters<typeof t>[0])}`} placeholder={t('produce.pricePlaceholder')} placeholderTextColor={MarketColors.muted} style={[styles.input, styles.priceInput]} />
+            <Text style={styles.priceUnit}>/ {t(`produce.priceUnit.${unit}` as Parameters<typeof t>[0])}</Text>
+          </View>
+          <Text style={styles.help}>{t('produce.askingPriceNote')}</Text>
+          {Number.isFinite(Number(quantity)) && Number(quantity) > 0 && Number.isFinite(Number(pricePerUnit)) && Number(pricePerUnit) > 0 ? <Text style={styles.estimate}>{t('produce.estimatedTotalValue').replace('{amount}', new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(Number(quantity) * Number(pricePerUnit)))}</Text> : null}
+        </View>
+
         <View style={styles.photoHead}>
           <View><Text style={styles.label}>{t('produce.photos')} *</Text><Text style={styles.help}>{t('produce.photoRequirement')}</Text></View>
           <Text style={styles.photoCount}>{photos.length}/5</Text>
@@ -185,6 +199,6 @@ const styles = StyleSheet.create({
   card: { backgroundColor: MarketColors.card, borderRadius: 22, borderWidth: 1, borderColor: MarketColors.border, padding: 20, gap: 15 },
   eyebrow: { color: MarketColors.blue, fontSize: 11, fontWeight: '800', letterSpacing: 1 }, title: { color: MarketColors.text, fontSize: 24, fontWeight: '800', marginTop: -9 }, intro: { color: MarketColors.muted, fontSize: 13, lineHeight: 19, marginTop: -9 },
   field: { gap: 7 }, label: { color: MarketColors.text, fontSize: 14, fontWeight: '700' }, input: { minHeight: 48, borderWidth: 1, borderColor: MarketColors.border, borderRadius: 12, backgroundColor: MarketColors.background, paddingHorizontal: 12, color: MarketColors.text, fontSize: 15 }, nameRow: { flexDirection: 'row', gap: 8 }, nameInput: { flex: 1 }, voiceButton: { width: 50, height: 48, borderRadius: 12, backgroundColor: MarketColors.blueSoft, justifyContent: 'center', alignItems: 'center' }, voiceActive: { backgroundColor: '#FDECEC' }, voiceText: { color: MarketColors.blue, fontSize: 19 },
-  help: { color: MarketColors.muted, fontSize: 12, lineHeight: 17 }, successText: { color: MarketColors.greenDark, fontSize: 12, fontWeight: '700' }, quantityRow: { gap: 9 }, quantityInput: { width: '100%' }, units: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 }, unit: { minHeight: 38, borderRadius: 10, borderWidth: 1, borderColor: MarketColors.border, paddingHorizontal: 12, justifyContent: 'center' }, unitSelected: { borderColor: MarketColors.green, backgroundColor: MarketColors.greenSoft }, unitText: { color: MarketColors.text, fontSize: 12, fontWeight: '600' }, unitTextSelected: { color: MarketColors.greenDark, fontWeight: '800' },
+  help: { color: MarketColors.muted, fontSize: 12, lineHeight: 17 }, successText: { color: MarketColors.greenDark, fontSize: 12, fontWeight: '700' }, quantityRow: { gap: 9 }, quantityInput: { width: '100%' }, units: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 }, unit: { minHeight: 38, borderRadius: 10, borderWidth: 1, borderColor: MarketColors.border, paddingHorizontal: 12, justifyContent: 'center' }, unitSelected: { borderColor: MarketColors.green, backgroundColor: MarketColors.greenSoft }, unitText: { color: MarketColors.text, fontSize: 12, fontWeight: '600' }, unitTextSelected: { color: MarketColors.greenDark, fontWeight: '800' }, priceRow: { flexDirection: 'row', alignItems: 'center', gap: 8 }, currencyPrefix: { color: MarketColors.text, fontSize: 17, fontWeight: '800' }, priceInput: { flex: 1 }, priceUnit: { color: MarketColors.greenDark, fontWeight: '800', fontSize: 13 }, estimate: { color: MarketColors.greenDark, fontSize: 13, fontWeight: '700' },
   photoHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, photoCount: { color: MarketColors.greenDark, fontWeight: '800' }, captureButton: { minHeight: 48, borderWidth: 1.4, borderColor: MarketColors.green, borderRadius: 12, alignItems: 'center', justifyContent: 'center' }, captureText: { color: MarketColors.green, fontWeight: '800' }, photoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, photoCard: { width: '31%', minWidth: 90, maxWidth: 150, height: 134, borderRadius: 12, backgroundColor: MarketColors.background, overflow: 'hidden' }, photo: { width: '100%', height: 96 }, removePhoto: { position: 'absolute', right: 5, top: 5, width: 27, height: 27, borderRadius: 14, backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center' }, removePhotoText: { color: '#B42318', fontSize: 21, lineHeight: 24, fontWeight: '800' }, retake: { flex: 1, alignItems: 'center', justifyContent: 'center' }, retakeText: { color: MarketColors.greenDark, fontSize: 11, fontWeight: '700' }, error: { color: '#B42318', fontSize: 13, lineHeight: 18 }, saveButton: { minHeight: 50, borderRadius: 13, backgroundColor: MarketColors.green, alignItems: 'center', justifyContent: 'center', marginTop: 3 }, saveText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' }, disabled: { opacity: 0.55 }, listingNote: { marginTop: 20, padding: 14, backgroundColor: MarketColors.greenSoft, borderRadius: 14 },
 });

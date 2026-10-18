@@ -62,12 +62,35 @@ const produceSchema = new Schema({
   farmerId: { type: Schema.Types.ObjectId, ref: 'Farmer', required: true, index: true },
   submissionId: { type: String, required: true },
   name: { type: String, required: true, trim: true, maxlength: 120 },
-  quantity: { type: Number, required: true, min: Number.MIN_VALUE },
+  nameTranslations: {
+    en: { type: String, trim: true, maxlength: 120 },
+    kn: { type: String, trim: true, maxlength: 120 },
+    tcy: { type: String, trim: true, maxlength: 120 },
+  },
+  quantity: { type: Number, required: true, min: Number.MIN_VALUE, max: 1_000_000_000 },
   unit: { type: String, enum: ['kg', 'quintal', 'bunch', 'pieces'], required: true },
+  pricePerUnit: { type: Number, min: Number.MIN_VALUE, max: 1_000_000_000, default: null },
   photos: [{ storageKey: { type: String, required: true }, mimeType: { type: String, enum: ['image/jpeg', 'image/png', 'image/webp'], required: true }, size: { type: Number, required: true } }],
-  status: { type: String, enum: ['awaiting_price'], required: true, default: 'awaiting_price' },
+  status: { type: String, enum: ['awaiting_price', 'priced_unpublished'], required: true, default: 'awaiting_price' },
 }, { timestamps: true, strict: 'throw' });
 produceSchema.index({ farmerId: 1, submissionId: 1 }, { unique: true });
+
+const marketPriceObservationSchema = new Schema({
+  recordKey: { type: String, required: true },
+  state: { type: String, required: true },
+  district: { type: String, required: true },
+  market: { type: String, required: true },
+  commodity: { type: String, required: true },
+  variety: { type: String, default: '' },
+  grade: { type: String, default: '' },
+  arrivalDate: { type: String, required: true },
+  minPrice: { type: Number, required: true },
+  maxPrice: { type: Number, required: true },
+  modalPrice: { type: Number, required: true },
+  fetchedAt: { type: Date, required: true },
+}, { timestamps: true, strict: 'throw' });
+marketPriceObservationSchema.index({ recordKey: 1, arrivalDate: 1 }, { unique: true });
+marketPriceObservationSchema.index({ recordKey: 1, arrivalDate: -1 });
 
 export type Farmer = InferSchemaType<typeof farmerSchema>;
 export type PendingFarmerRegistration = InferSchemaType<typeof pendingRegistrationSchema>;
@@ -77,3 +100,4 @@ export const OtpChallengeModel = mongoose.models.FarmerOtpChallenge ?? mongoose.
 export const SessionModel = mongoose.models.FarmerSession ?? mongoose.model('FarmerSession', sessionSchema);
 export const RateLimitModel = mongoose.models.FarmerRateLimit ?? mongoose.model('FarmerRateLimit', rateLimitSchema);
 export const ProduceModel = mongoose.models.FarmerProduce ?? mongoose.model('FarmerProduce', produceSchema);
+export const MarketPriceObservationModel = mongoose.models.MarketPriceObservation ?? mongoose.model('MarketPriceObservation', marketPriceObservationSchema);

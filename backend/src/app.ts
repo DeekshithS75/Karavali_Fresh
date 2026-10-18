@@ -6,12 +6,14 @@ import multer from 'multer';
 import { z } from 'zod';
 import { areSessionSecretsConfigured, config, isPhoneVerificationConfigured, isRegistrationEncryptionConfigured } from './config.js';
 import { decryptSecretValue, encryptSecretValue, hashAadhaar, hashPhone, hmac } from './crypto.js';
-import { FarmerModel, PendingRegistrationModel, ProduceModel } from './models/index.js';
+import { FarmerModel, MarketPriceObservationModel, PendingRegistrationModel, ProduceModel } from './models/index.js';
 import { compareAadhaarDocument, isOcrConfigured, OCR_ENGINE_NAME, type RegistrationDetails } from './providers/ocr.js';
 import { NaCallerError } from './providers/otp.js';
 import { ProviderNotConfiguredError } from './providers/errors.js';
 import { ApiError, assertRegistrationAvailable, cancelPhoneVerification, completePhoneVerification, createSession, enforceRateLimit, findAuthenticatedFarmer, findAuthenticatedSession, getPhoneVerificationStatus, startPhoneVerification } from './services/security.js';
 import { deleteProducePhotos, readProducePhoto, storeProducePhotos, ProduceStorageError } from './services/produce-storage.js';
+import { marketPriceProvider, MarketPriceProviderError, marketRecordKey, matchesProduceCommodity, type MarketPriceRecord } from './providers/market-prices.js';
+import { buildFarmerMarketComparison, previousArrivalDate, type FarmerProduceForMarket } from './services/market-comparison.js';
 
 const app = express();
 const upload = multer({
@@ -54,12 +56,18 @@ const produceInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
   quantity: z.coerce.number().finite().positive().max(1_000_000_000),
   unit: z.enum(['kg', 'quintal', 'bunch', 'pieces']),
+  pricePerUnit: z.coerce.number().finite().positive().max(1_000_000_000),
 });
+const producePriceSchema = z.object({ pricePerUnit: z.coerce.number().finite().positive().max(1_000_000_000) });
 const submissionIdSchema = z.string().uuid();
 type PendingFarmerDetails = Omit<RegistrationDetails, 'aadhaar'>;
 
 function sendError(response: Response, error: unknown) {
-  if (error instanceof z.ZodError) return response.status(400).json({ error: 'validation_failed', fields: error.issues.map(({ path, message }) => ({ field: path.join('.'), message })) });
+  if (error instanceof z.ZodError) {
+    const fields = error.issues.map(({ path, message }) => ({ field: path.join('.'), message }));
+    if (fields.some(({ field }) => field === 'pricePerUnit')) return response.status(400).json({ error: 'produce_price_invalid', fields });
+    return response.status(400).json({ error: 'validation_failed', fields });
+  }
   if (error instanceof ApiError) return response.status(error.status).json({ error: error.code });
   if (error instanceof ProviderNotConfiguredError) return response.status(503).json({ error: error.provider === 'ocr' ? 'ocr_engine_not_configured' : 'phone_verification_provider_not_configured' });
   if (error instanceof NaCallerError) {
@@ -75,6 +83,13 @@ function sendError(response: Response, error: unknown) {
     if (error.code === 'not_found') return response.status(404).json({ error: 'produce_image_not_found' });
     if (error.code === 'not_configured') return response.status(503).json({ error: 'produce_image_storage_not_configured' });
     return response.status(503).json({ error: 'produce_image_storage_failed' });
+  }
+  if (error instanceof MarketPriceProviderError) {
+    if (error.code === 'not_configured') return response.status(503).json({ error: 'market_price_provider_not_configured' });
+    if (error.code === 'response_invalid') return response.status(502).json({ error: 'market_price_response_invalid' });
+    if (error.code === 'invalid_api_key') return response.status(503).json({ error: 'market_price_api_key_invalid' });
+    if (error.code === 'rate_limited') return response.status(429).json({ error: 'market_price_rate_limited' });
+    return response.status(503).json({ error: 'market_price_provider_unavailable' });
   }
   if (error instanceof multer.MulterError) {
     return response.status(400).json({ error: error.code === 'LIMIT_FILE_SIZE' ? 'produce_image_too_large' : error.code === 'LIMIT_FILE_COUNT' ? 'too_many_produce_images' : 'invalid_produce_upload' });
@@ -318,12 +333,14 @@ app.get('/api/farmer/profile', async (request, response) => {
   } catch (error) { return sendError(response, error); }
 });
 
-function formatProduce(record: { id: string; name: string; quantity: number; unit: string; status: string; photos: Array<{ storageKey: string; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date }) {
+function formatProduce(record: { id: string; name: string; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit?: number | null; status: string; photos: Array<{ storageKey: string; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date }) {
   return {
     id: record.id,
     name: record.name,
+    ...(record.nameTranslations ? { nameTranslations: record.nameTranslations } : {}),
     quantity: record.quantity,
     unit: record.unit,
+    pricePerUnit: record.pricePerUnit ?? null,
     status: record.status,
     photos: record.photos.map((photo, index) => ({
       url: `/api/farmer/produce/${record.id}/photos/${index}`,
@@ -339,10 +356,52 @@ app.get('/api/farmer/produce', async (request, response) => {
   try {
     const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
     const records = await ProduceModel.find({ farmerId: farmer._id }).sort({ createdAt: -1 }).lean().exec() as unknown as Array<{
-      _id: Types.ObjectId; name: string; quantity: number; unit: string; status: string;
+      _id: Types.ObjectId; name: string; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit?: number | null; status: string;
       photos: Array<{ storageKey: string; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date;
     }>;
     return response.json({ items: records.map((record) => formatProduce({ ...record, id: String(record._id) })) });
+  } catch (error) { return sendError(response, error); }
+});
+
+app.get('/api/farmer/produce/:produceId/market-comparison', async (request, response) => {
+  try {
+    const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
+    if (!Types.ObjectId.isValid(request.params.produceId)) throw new ApiError(404, 'produce_not_found');
+    const record = await ProduceModel.findOne({ _id: request.params.produceId, farmerId: farmer._id }).lean().exec() as {
+      _id: Types.ObjectId; name: string; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>;
+      unit: FarmerProduceForMarket['unit']; pricePerUnit?: number | null;
+    } | null;
+    if (!record) throw new ApiError(404, 'produce_not_found');
+
+    const names = [record.name, ...Object.values(record.nameTranslations ?? {})].filter((name): name is string => Boolean(name?.trim()));
+    const dataset = await marketPriceProvider.getCoastalRecords(names);
+    const matching = dataset.records.filter((item) => matchesProduceCommodity(item, names));
+    const previousQueries = matching.map((item) => ({ recordKey: marketRecordKey(item), arrivalDate: previousArrivalDate(item.arrivalDate) }));
+    const previous = previousQueries.length
+      ? await MarketPriceObservationModel.find({ $or: previousQueries }).lean().exec() as unknown as Array<{
+        recordKey: string; arrivalDate: string; state: string; district: string; market: string; commodity: string;
+        variety: string; grade: string; minPrice: number; maxPrice: number; modalPrice: number;
+      }>
+      : [];
+    const previousByKeyAndDate = new Map(previous.map((item) => [
+      `${item.recordKey}|${item.arrivalDate}`,
+      { ...item, arrivalDate: item.arrivalDate } as MarketPriceRecord,
+    ]));
+    if (matching.length) await MarketPriceObservationModel.bulkWrite(matching.map((item) => {
+      const recordKey = marketRecordKey(item);
+      return { updateOne: {
+        filter: { recordKey, arrivalDate: item.arrivalDate },
+        update: { $set: { recordKey, state: item.state, district: item.district, market: item.market, commodity: item.commodity,
+          variety: item.variety, grade: item.grade, arrivalDate: item.arrivalDate, minPrice: item.minPrice, maxPrice: item.maxPrice,
+          modalPrice: item.modalPrice, fetchedAt: new Date(dataset.fetchedAt) } },
+        upsert: true,
+      } };
+    }));
+    return response.json({
+      comparison: buildFarmerMarketComparison({
+        name: record.name, nameTranslations: record.nameTranslations, unit: record.unit, pricePerUnit: record.pricePerUnit ?? null,
+      }, dataset.records, dataset.fetchedAt, previousByKeyAndDate),
+    });
   } catch (error) { return sendError(response, error); }
 });
 
@@ -359,31 +418,63 @@ app.post('/api/farmer/produce', produceUpload.array('photos', 5), async (request
     const uploads = (request.files ?? []) as Express.Multer.File[];
     if (uploads.length < 2 || uploads.length > 5) throw new ApiError(400, 'produce_photo_count_invalid');
     const existing = await ProduceModel.findOne({ farmerId: farmer._id, submissionId }).lean().exec() as {
-      _id: Types.ObjectId; name: string; quantity: number; unit: string; status: string;
+      _id: Types.ObjectId; name: string; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit?: number | null; status: string;
       photos: Array<{ storageKey: string; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date;
     } | null;
-    if (existing) return response.status(200).json({ item: formatProduce({ ...existing, id: String(existing._id) }) });
+    if (existing) {
+      if (existing.status === 'awaiting_price' && existing.pricePerUnit == null) {
+        const updated = await ProduceModel.findOneAndUpdate(
+          { _id: existing._id, farmerId: farmer._id, status: 'awaiting_price', pricePerUnit: null },
+          { $set: { pricePerUnit: input.pricePerUnit, status: 'priced_unpublished' } },
+          { new: true, runValidators: true },
+        ).lean().exec() as typeof existing | null;
+        if (updated) return response.status(200).json({ item: formatProduce({ ...updated, id: String(updated._id) }) });
+      }
+      return response.status(200).json({ item: formatProduce({ ...existing, id: String(existing._id) }) });
+    }
 
     storedPhotos = await storeProducePhotos(uploads);
     const [record] = await ProduceModel.create([{
       farmerId: farmer._id, submissionId, name: input.name, quantity: input.quantity, unit: input.unit,
-      photos: storedPhotos, status: 'awaiting_price',
+      pricePerUnit: input.pricePerUnit, photos: storedPhotos, status: 'priced_unpublished',
     }]);
     return response.status(201).json({ item: formatProduce({
       id: String(record._id), name: record.name, quantity: record.quantity, unit: record.unit,
-      status: record.status, photos: record.photos, createdAt: record.createdAt, updatedAt: record.updatedAt,
+      pricePerUnit: record.pricePerUnit, status: record.status, photos: record.photos, createdAt: record.createdAt, updatedAt: record.updatedAt,
     }) });
   } catch (error) {
     await deleteProducePhotos(storedPhotos);
     if (ownerId && requestSubmissionId && error instanceof Error && 'code' in error && error.code === 11000) {
       const existing = await ProduceModel.findOne({ farmerId: ownerId, submissionId: requestSubmissionId }).lean().exec() as unknown as {
-        _id: Types.ObjectId; name: string; quantity: number; unit: string; status: string;
+        _id: Types.ObjectId; name: string; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit?: number | null; status: string;
         photos: Array<{ storageKey: string; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date;
       } | null;
       if (existing) return response.status(200).json({ item: formatProduce({ ...existing, id: String(existing._id) }) });
     }
     return sendError(response, error);
   }
+});
+
+app.patch('/api/farmer/produce/:produceId/price', async (request, response) => {
+  try {
+    const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
+    if (!Types.ObjectId.isValid(request.params.produceId)) throw new ApiError(404, 'produce_not_found');
+    const { pricePerUnit } = producePriceSchema.parse(request.body);
+    const record = await ProduceModel.findOneAndUpdate(
+      { _id: request.params.produceId, farmerId: farmer._id, status: 'awaiting_price', pricePerUnit: null },
+      { $set: { pricePerUnit, status: 'priced_unpublished' } },
+      { new: true, runValidators: true },
+    ).lean().exec() as {
+      _id: Types.ObjectId; name: string; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit: number | null; status: string;
+      photos: Array<{ storageKey: string; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date;
+    } | null;
+    if (!record) {
+      const ownedRecord = await ProduceModel.findOne({ _id: request.params.produceId, farmerId: farmer._id }).select('_id').lean().exec();
+      if (!ownedRecord) throw new ApiError(404, 'produce_not_found');
+      throw new ApiError(409, 'produce_price_already_set');
+    }
+    return response.json({ item: formatProduce({ ...record, id: String(record._id) }) });
+  } catch (error) { return sendError(response, error); }
 });
 
 app.get('/api/farmer/produce/:produceId/photos/:photoIndex', async (request, response) => {

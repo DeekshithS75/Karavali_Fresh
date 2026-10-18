@@ -1,6 +1,6 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Image } from 'expo-image';
 
 import {
@@ -12,18 +12,56 @@ import {
 } from '@/components/marketplace-ui';
 import { useLanguage } from '@/localization/LanguageProvider';
 import { FarmerDashboardGuard } from '@/components/farmer-auth-flow';
-import { FarmerAuthError, getFarmerProduce, getFarmerProfile, getFarmerSessionState, type FarmerProduce, type FarmerProfile } from '@/features/farmer-auth/client';
+import { FarmerAuthError, getFarmerMarketComparison, getFarmerProduce, getFarmerProfile, getFarmerSessionState, type FarmerMarketComparison, type FarmerProduce, type FarmerProfile } from '@/features/farmer-auth/client';
 
 type ProfileState = 'loading' | 'loaded' | 'error' | 'missing';
 
 export default function FarmerHomeScreen() {
-  const { t } = useLanguage();
-  const params = useLocalSearchParams<{ produceAdded?: string }>();
+  const { t, language } = useLanguage();
+  const params = useLocalSearchParams<{ produceAdded?: string; producePriceAdded?: string }>();
   const [profile, setProfile] = useState<FarmerProfile | null>(null);
   const [profileState, setProfileState] = useState<ProfileState>('loading');
   const [retryCount, setRetryCount] = useState(0);
   const [produce, setProduce] = useState<FarmerProduce[]>([]);
   const [produceState, setProduceState] = useState<ProfileState>('loading');
+  const [marketResults, setMarketResults] = useState<Record<string, FarmerMarketComparison | null>>({});
+  const [marketErrors, setMarketErrors] = useState<Record<string, 'unavailable' | 'notConfigured' | 'invalidKey' | 'rateLimited'>>({});
+  const [marketLoadingId, setMarketLoadingId] = useState<string | null>(null);
+  const marketController = useRef<AbortController | null>(null);
+
+  useEffect(() => () => marketController.current?.abort(), []);
+
+  const compareMarketPrice = async (item: FarmerProduce) => {
+    if (marketLoadingId) return;
+    const controller = new AbortController();
+    marketController.current?.abort();
+    marketController.current = controller;
+    setMarketLoadingId(item.id);
+    setMarketErrors((current) => { const next = { ...current }; delete next[item.id]; return next; });
+    try {
+      const result = await getFarmerMarketComparison(item.id, controller.signal);
+      setMarketResults((current) => ({ ...current, [item.id]: result }));
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      if (error instanceof FarmerAuthError && error.code === 'unauthorized') {
+        const sessionState = await getFarmerSessionState();
+        if (sessionState === 'missing' || sessionState === 'invalid') { router.replace('/auth/farmer'); return; }
+      }
+      const marketError = error instanceof FarmerAuthError && error.code === 'marketPriceNotConfigured' ? 'notConfigured'
+        : error instanceof FarmerAuthError && error.code === 'marketPriceInvalidKey' ? 'invalidKey'
+          : error instanceof FarmerAuthError && error.code === 'marketPriceRateLimited' ? 'rateLimited' : 'unavailable';
+      setMarketErrors((current) => ({ ...current, [item.id]: marketError }));
+    } finally {
+      if (marketController.current === controller) {
+        marketController.current = null;
+        setMarketLoadingId(null);
+      }
+    }
+  };
+
+  const formatRupees = (amount: number) => new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', {
+    style: 'currency', currency: 'INR', maximumFractionDigits: 2,
+  }).format(amount);
 
   useEffect(() => {
     let active = true;
@@ -70,7 +108,7 @@ export default function FarmerHomeScreen() {
         if (active) setProduceState('error');
       });
     return () => { active = false; controller.abort(); };
-  }, [retryCount]);
+  }, [retryCount, params.produceAdded, params.producePriceAdded]);
 
   const retryProfile = () => {
     setProfile(null);
@@ -107,7 +145,7 @@ export default function FarmerHomeScreen() {
         </Pressable>
       </View>
 
-      {params.produceAdded === '1' ? <View accessibilityRole="alert" style={styles.savedNotice}><Text style={styles.savedNoticeText}>{t('produce.saved')}</Text></View> : null}
+      {params.produceAdded === '1' ? <View accessibilityRole="alert" style={styles.savedNotice}><Text style={styles.savedNoticeText}>{t('produce.saved')}</Text></View> : params.producePriceAdded === '1' ? <View accessibilityRole="alert" style={styles.savedNotice}><Text style={styles.savedNoticeText}>{t('produce.priceSaved')}</Text></View> : null}
 
       <View style={styles.section}>
         <SectionHeading title={t('farmer.listings.title')} detail={t('farmer.listings.detail')} />
@@ -119,11 +157,38 @@ export default function FarmerHomeScreen() {
           title={t('farmer.listings.emptyTitle')}
           message={t('farmer.listings.emptyMessage')}
         /> : <View style={styles.listingStack}>{produce.map((item) => <View key={item.id} style={styles.produceCard}>
-          {item.photos[0] ? <Image source={{ uri: item.photos[0].url, headers: item.photos[0].headers }} style={styles.produceImage} accessibilityLabel={`${t('produce.photoPreview')} ${item.name}`} /> : <View style={styles.produceImagePlaceholder}><Text style={styles.produceImageGlyph}>🌱</Text></View>}
+          <View style={styles.producePhotos}>{item.photos.length ? item.photos.map((photo, index) => <Image key={`${photo.url}-${index}`} source={{ uri: photo.url, headers: photo.headers }} style={styles.produceImage} accessibilityLabel={`${t('produce.photoPreview')} ${item.name} ${index + 1}`} />) : <View style={styles.produceImagePlaceholder}><Text style={styles.produceImageGlyph}>🌱</Text></View>}</View>
           <View style={styles.produceInfo}>
-            <Text style={styles.produceName}>{item.name}</Text>
+            <Text style={styles.produceName}>{item.nameTranslations?.[language]?.trim() || item.name}</Text>
             <Text style={styles.produceQuantity}>{t('produce.availableQuantity').replace('{quantity}', String(item.quantity)).replace('{unit}', t(`produce.unit.${item.unit}` as Parameters<typeof t>[0]))}</Text>
-            <Text style={styles.pricePending}>{t('produce.priceNotAdded')}</Text>
+            {item.pricePerUnit != null ? <Text style={styles.producePrice}>{new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(item.pricePerUnit)} / {t(`produce.priceUnit.${item.unit}` as Parameters<typeof t>[0])}</Text> : <>
+              <Text style={styles.pricePending}>{t('produce.status.awaitingPrice')}</Text>
+              <Pressable accessibilityRole="button" onPress={() => router.push({ pathname: '/farmer-add-price', params: { produceId: item.id } })} style={styles.addPriceButton}><Text style={styles.addPriceButtonText}>{t('produce.addPrice')}</Text></Pressable>
+            </>}
+            {item.status === 'priced_unpublished' ? <Text style={styles.pricePending}>{t('produce.status.pricedUnpublished')}</Text> : null}
+            <Pressable accessibilityRole="button" disabled={Boolean(marketLoadingId) || item.pricePerUnit == null} onPress={() => void compareMarketPrice(item)} style={[styles.marketCompareButton, (Boolean(marketLoadingId) || item.pricePerUnit == null) && styles.marketCompareDisabled]}>
+              <Text style={styles.marketCompareText}>{marketLoadingId === item.id ? t('farmer.prices.comparing') : t('farmer.prices.compare')}</Text>
+            </Pressable>
+            {marketErrors[item.id] ? <View style={styles.marketResultPanel}>
+              <Text accessibilityRole="alert" style={styles.marketMessage}>{t(marketErrors[item.id] === 'notConfigured' ? 'farmer.prices.notConfigured' : marketErrors[item.id] === 'invalidKey' ? 'farmer.prices.invalidKey' : marketErrors[item.id] === 'rateLimited' ? 'farmer.prices.rateLimited' : 'farmer.prices.providerError')}</Text>
+              <Pressable accessibilityRole="button" disabled={Boolean(marketLoadingId)} onPress={() => void compareMarketPrice(item)} style={styles.profileRetry}><Text style={styles.profileRetryText}>{t('farmer.prices.retry')}</Text></Pressable>
+            </View> : null}
+            {marketResults[item.id] ? <View style={styles.marketResultPanel}>
+              {marketResults[item.id]!.status === 'missing' ? <Text style={styles.marketMessage}>{t('farmer.prices.missing')}</Text> : null}
+              {marketResults[item.id]!.status === 'stale' ? <Text style={styles.marketMessage}>{t('farmer.prices.stale')}</Text> : null}
+              {marketResults[item.id]!.items.map((market, index) => <View key={`${market.district}-${market.market}-${market.commodity}-${market.variety ?? ''}-${market.grade ?? ''}-${market.sourceDate}-${index}`} style={styles.marketRow}>
+                <Text style={styles.marketName}>{market.market} · {market.district}</Text>
+                <Text style={styles.marketMessage}>{market.commodity}{market.variety ? ` · ${market.variety}` : ''}{market.grade ? ` · ${market.grade}` : ''}</Text>
+                {market.stale ? <Text style={styles.marketMessage}>{t('farmer.prices.stale')}</Text> : null}
+                {market.unitCompatible && market.minPrice !== null && market.maxPrice !== null ? <Text style={styles.marketMessage}>{t('farmer.prices.range').replace('{min}', formatRupees(market.minPrice)).replace('{max}', formatRupees(market.maxPrice))} / {t(`produce.priceUnit.${item.unit}` as Parameters<typeof t>[0])}</Text> : <Text style={styles.marketMessage}>{t('farmer.prices.unitIncompatible')}</Text>}
+                {market.unitCompatible && market.modalPrice !== null ? <Text style={styles.marketMessage}>{t('farmer.prices.modal').replace('{price}', formatRupees(market.modalPrice))} / {t(`produce.priceUnit.${item.unit}` as Parameters<typeof t>[0])}</Text> : null}
+                <Text style={styles.marketMessage}>{t('farmer.prices.observationDate').replace('{date}', market.sourceDate)}</Text>
+                <Text style={styles.marketMessage}>{t(market.askingPriceVsModal === 'below' ? 'farmer.prices.askingBelow' : market.askingPriceVsModal === 'above' ? 'farmer.prices.askingAbove' : market.askingPriceVsModal === 'equal' ? 'farmer.prices.askingEqual' : 'farmer.prices.askingUnavailable')}</Text>
+                <Text style={styles.marketMessage}>{t(market.unchangedOnConsecutiveReport === true ? 'farmer.prices.unchanged' : market.unchangedOnConsecutiveReport === false ? 'farmer.prices.changed' : 'farmer.prices.historyUnavailable')}</Text>
+              </View>)}
+              <Text style={styles.marketMessage}>{t('farmer.prices.fetchedAt').replace('{date}', new Intl.DateTimeFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(marketResults[item.id]!.fetchedAt)))}</Text>
+              <Text style={styles.marketAttribution}>{t('farmer.prices.attribution')}</Text>
+            </View> : null}
           </View>
         </View>)}</View>}
       </View>
@@ -178,5 +243,6 @@ const styles = StyleSheet.create({
   },
   addIcon: { color: '#FFFFFF', fontSize: 20, marginRight: 7 },
   addButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
-  section: { marginBottom: 22 }, savedNotice: { backgroundColor: MarketColors.greenSoft, borderRadius: 12, padding: 12, marginTop: -8, marginBottom: 18 }, savedNoticeText: { color: MarketColors.greenDark, fontSize: 13, fontWeight: '700' }, listingMessage: { color: MarketColors.muted, fontSize: 13, lineHeight: 19 }, listingError: { borderRadius: 13, backgroundColor: '#FFF4D6', padding: 12 }, listingStack: { gap: 10 }, produceCard: { flexDirection: 'row', gap: 12, alignItems: 'center', backgroundColor: '#FFFFFF', borderRadius: 16, borderWidth: 1, borderColor: MarketColors.border, padding: 10 }, produceImage: { width: 76, height: 76, borderRadius: 12, backgroundColor: MarketColors.background }, produceImagePlaceholder: { width: 76, height: 76, borderRadius: 12, backgroundColor: MarketColors.greenSoft, alignItems: 'center', justifyContent: 'center' }, produceImageGlyph: { fontSize: 24 }, produceInfo: { flex: 1, gap: 4 }, produceName: { color: MarketColors.text, fontSize: 15, fontWeight: '800' }, produceQuantity: { color: MarketColors.muted, fontSize: 12 }, pricePending: { color: MarketColors.blue, fontSize: 11, fontWeight: '700' },
+  section: { marginBottom: 22 }, savedNotice: { backgroundColor: MarketColors.greenSoft, borderRadius: 12, padding: 12, marginTop: -8, marginBottom: 18 }, savedNoticeText: { color: MarketColors.greenDark, fontSize: 13, fontWeight: '700' }, listingMessage: { color: MarketColors.muted, fontSize: 13, lineHeight: 19 }, listingError: { borderRadius: 13, backgroundColor: '#FFF4D6', padding: 12 }, listingStack: { gap: 10 }, produceCard: { gap: 10, backgroundColor: '#FFFFFF', borderRadius: 16, borderWidth: 1, borderColor: MarketColors.border, padding: 10 }, producePhotos: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 }, produceImage: { width: 64, height: 64, borderRadius: 10, backgroundColor: MarketColors.background }, produceImagePlaceholder: { width: 64, height: 64, borderRadius: 10, backgroundColor: MarketColors.greenSoft, alignItems: 'center', justifyContent: 'center' }, produceImageGlyph: { fontSize: 24 }, produceInfo: { gap: 4 }, produceName: { color: MarketColors.text, fontSize: 15, fontWeight: '800' }, produceQuantity: { color: MarketColors.muted, fontSize: 12 }, producePrice: { color: MarketColors.greenDark, fontSize: 13, fontWeight: '800' }, pricePending: { color: MarketColors.blue, fontSize: 11, fontWeight: '700' }, addPriceButton: { minHeight: 36, alignSelf: 'flex-start', justifyContent: 'center', paddingHorizontal: 10, borderRadius: 9, backgroundColor: MarketColors.greenSoft }, addPriceButtonText: { color: MarketColors.greenDark, fontSize: 12, fontWeight: '800' },
+  marketCompareButton: { minHeight: 38, alignSelf: 'flex-start', justifyContent: 'center', paddingHorizontal: 12, borderRadius: 10, backgroundColor: MarketColors.blueSoft }, marketCompareDisabled: { opacity: 0.5 }, marketCompareText: { color: MarketColors.blue, fontSize: 12, fontWeight: '800' }, marketResultPanel: { backgroundColor: MarketColors.blueSoft, borderRadius: 12, padding: 10, gap: 6, marginTop: 4 }, marketRow: { borderTopWidth: 1, borderTopColor: MarketColors.border, paddingTop: 8, marginTop: 4, gap: 3 }, marketName: { color: MarketColors.text, fontSize: 13, fontWeight: '800' }, marketMessage: { color: MarketColors.muted, fontSize: 12, lineHeight: 18 }, marketAttribution: { color: MarketColors.muted, fontSize: 10, lineHeight: 15, marginTop: 3 },
 });

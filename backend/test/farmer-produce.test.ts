@@ -40,10 +40,10 @@ async function withServer(context: TestContext) {
   context.after(async () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
   const address = server.address();
   assert.ok(address && typeof address === 'object');
-  return (path: string, form?: FormData, method = 'POST') => fetch(`http://127.0.0.1:${address.port}${path}`, {
+  return (path: string, body?: BodyInit, method = 'POST', extraHeaders: HeadersInit = {}) => fetch(`http://127.0.0.1:${address.port}${path}`, {
     method,
-    headers: { Authorization: `Bearer ${token}`, ...(method === 'POST' ? { 'Idempotency-Key': '123e4567-e89b-42d3-a456-426614174000' } : {}) },
-    ...(form ? { body: form } : {}),
+    headers: { Authorization: `Bearer ${token}`, ...(method === 'POST' ? { 'Idempotency-Key': '123e4567-e89b-42d3-a456-426614174000' } : {}), ...extraHeaders },
+    ...(body ? { body } : {}),
   });
 }
 
@@ -52,11 +52,12 @@ async function fictionalImage() {
   return sharp(Buffer.from(svg)).png().toBuffer();
 }
 
-function makeForm(image: Buffer | null, options: { name?: string; quantity?: string; unit?: string; count?: number; imageMime?: string } = {}) {
+function makeForm(image: Buffer | null, options: { name?: string; quantity?: string; unit?: string; pricePerUnit?: string; omitPrice?: boolean; count?: number; imageMime?: string } = {}) {
   const form = new FormData();
   form.append('name', options.name ?? 'Fictional Kale');
   form.append('quantity', options.quantity ?? '12.5');
   form.append('unit', options.unit ?? 'kg');
+  if (!options.omitPrice) form.append('pricePerUnit', options.pricePerUnit ?? '45.75');
   form.append('farmerId', otherFarmerId);
   for (let index = 0; image && index < (options.count ?? 2); index++) {
     form.append('photos', new Blob([new Uint8Array(image)], { type: options.imageMime ?? 'image/png' }), `produce-${index}.png`);
@@ -64,7 +65,7 @@ function makeForm(image: Buffer | null, options: { name?: string; quantity?: str
   return form;
 }
 
-test('authenticated create stores a draft owned by the session Farmer and returns safe photo metadata', async (context) => {
+test('authenticated create stores a priced unpublished listing owned by the session Farmer', async (context) => {
   mockAuthentication(context);
   const image = await fictionalImage();
   context.mock.method(models.ProduceModel, 'findOne', () => ({ lean: () => ({ exec: async () => null }) }) as never);
@@ -73,15 +74,20 @@ test('authenticated create stores a draft owned by the session Farmer and return
     assert.equal(String(document.farmerId), farmerId);
     assert.equal(document.name, 'Fictional Kale');
     assert.equal(document.quantity, 12.5);
-    assert.equal(document.status, 'awaiting_price');
+    assert.equal(document.unit, 'kg');
+    assert.equal(document.pricePerUnit, 45.75);
+    assert.equal(document.status, 'priced_unpublished');
     const now = new Date();
     return [{ ...document, _id: 'fictional-produce-id', createdAt: now, updatedAt: now }] as never;
   });
   const post = await withServer(context);
   const response = await post('/api/farmer/produce', makeForm(image));
   assert.equal(response.status, 201);
-  const body = await response.json() as { item: { status: string; photos: Array<{ url: string }> } };
-  assert.equal(body.item.status, 'awaiting_price');
+  const body = await response.json() as { item: { status: string; pricePerUnit: number; quantity: number; unit: string; photos: Array<{ url: string }> } };
+  assert.equal(body.item.status, 'priced_unpublished');
+  assert.equal(body.item.pricePerUnit, 45.75);
+  assert.equal(body.item.quantity, 12.5);
+  assert.equal(body.item.unit, 'kg');
   assert.equal(body.item.photos.length, 2);
   assert.match(body.item.photos[0]!.url, /\/photos\/0$/);
 });
@@ -115,6 +121,74 @@ test('produce creation rejects invalid quantity, missing photos, and more than f
   assert.deepEqual(await missingPhotos.json(), { error: 'produce_photo_count_invalid' });
   const tooMany = await post('/api/farmer/produce', makeForm(image, { count: 6 }));
   assert.equal(tooMany.status, 400);
+});
+
+test('produce creation rejects missing, zero, negative, and malformed prices', async (context) => {
+  mockAuthentication(context);
+  const post = await withServer(context);
+  const image = await fictionalImage();
+  for (const form of [
+    makeForm(image, { omitPrice: true }),
+    makeForm(image, { pricePerUnit: '0' }),
+    makeForm(image, { pricePerUnit: '-4' }),
+    makeForm(image, { pricePerUnit: 'not-a-price' }),
+  ]) {
+    const response = await post('/api/farmer/produce', form);
+    assert.equal(response.status, 400);
+    assert.equal((await response.json() as { error: string }).error, 'produce_price_invalid');
+  }
+});
+
+test('owner can add a price to an existing awaiting-price draft without replacing its photos or quantity', async (context) => {
+  mockAuthentication(context);
+  const produceId = '64b000000000000000000001';
+  const createdAt = new Date('2026-01-01T00:00:00.000Z');
+  const originalPhoto = { storageKey: 'existing-photo-key.png', mimeType: 'image/png', size: 1234 };
+  const updated = {
+    _id: produceId, name: 'Fictional Kale', nameTranslations: { kn: 'ಕಾಲ್ಪನಿಕ ಸೊಪ್ಪು' }, quantity: 12.5, unit: 'quintal', pricePerUnit: 88.25,
+    status: 'priced_unpublished', photos: [originalPhoto, { ...originalPhoto, storageKey: 'photo-two.png' }],
+    createdAt, updatedAt: new Date(),
+  };
+  context.mock.method(models.ProduceModel, 'findOneAndUpdate', (filter: unknown, update: unknown, options: unknown) => {
+    const query = filter as { _id: string; farmerId: string; status: string; pricePerUnit: null };
+    assert.equal(query._id, produceId);
+    assert.equal(query.farmerId, farmerId);
+    assert.equal(query.status, 'awaiting_price');
+    assert.equal(query.pricePerUnit, null);
+    assert.deepEqual(update, { $set: { pricePerUnit: 88.25, status: 'priced_unpublished' } });
+    assert.deepEqual(options, { new: true, runValidators: true });
+    return { lean: () => ({ exec: async () => updated }) } as never;
+  });
+  const patchPrice = await withServer(context);
+  const response = await patchPrice(`/api/farmer/produce/${produceId}/price`, JSON.stringify({ pricePerUnit: '88.25' }), 'PATCH', { 'Content-Type': 'application/json' });
+  assert.equal(response.status, 200);
+  const body = await response.json() as { item: { pricePerUnit: number; quantity: number; unit: string; status: string; nameTranslations: { kn: string }; photos: Array<{ url: string }> } };
+  assert.equal(body.item.pricePerUnit, 88.25);
+  assert.equal(body.item.quantity, 12.5);
+  assert.equal(body.item.unit, 'quintal');
+  assert.equal(body.item.status, 'priced_unpublished');
+  assert.deepEqual(body.item.nameTranslations, { kn: 'ಕಾಲ್ಪನಿಕ ಸೊಪ್ಪು' });
+  assert.deepEqual(body.item.photos.map(({ url }) => url), [
+    `/api/farmer/produce/${produceId}/photos/0`,
+    `/api/farmer/produce/${produceId}/photos/1`,
+  ]);
+});
+
+test('one Farmer cannot add a price to another Farmer listing', async (context) => {
+  mockAuthentication(context);
+  const produceId = '64b000000000000000000002';
+  context.mock.method(models.ProduceModel, 'findOneAndUpdate', (filter: unknown) => {
+    assert.equal((filter as { farmerId: string }).farmerId, farmerId);
+    return { lean: () => ({ exec: async () => null }) } as never;
+  });
+  context.mock.method(models.ProduceModel, 'findOne', (filter: unknown) => {
+    assert.equal((filter as { farmerId: string }).farmerId, farmerId);
+    return { select: () => ({ lean: () => ({ exec: async () => null }) }) } as never;
+  });
+  const patchPrice = await withServer(context);
+  const response = await patchPrice(`/api/farmer/produce/${produceId}/price`, JSON.stringify({ pricePerUnit: 12 }), 'PATCH', { 'Content-Type': 'application/json' });
+  assert.equal(response.status, 404);
+  assert.deepEqual(await response.json(), { error: 'produce_not_found' });
 });
 
 test('produce creation rejects unsupported image bytes even when the multipart MIME says PNG', async (context) => {

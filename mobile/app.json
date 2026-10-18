@@ -8,7 +8,11 @@
     "scheme": "mobile",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "icon": "./assets/expo.icon",
+      "infoPlist": {
+        "NSSpeechRecognitionUsageDescription": "Allow Karavali Fresh to recognize produce name dictation.",
+        "NSMicrophoneUsageDescription": "Allow Karavali Fresh to use the microphone for produce name dictation."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -17,7 +21,11 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ],
+      "package": "com.deekshiths75.mobile"
     },
     "web": {
       "output": "server",
@@ -42,8 +50,7 @@
         "expo-image-picker",
         {
           "photosPermission": "Allow Karavali Fresh to select a verification document after you consent.",
-          "cameraPermission": "Allow Karavali Fresh to capture produce photos and verification documents after you consent.",
-          "microphonePermission": false
+          "cameraPermission": "Allow Karavali Fresh to capture produce photos and verification documents after you consent."
         }
       ],
       [

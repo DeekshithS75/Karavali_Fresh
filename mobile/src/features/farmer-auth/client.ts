@@ -7,7 +7,7 @@ import { appendRegistrationDocument } from './document-upload';
 
 const API_BASE = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 
-type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'exists' | 'documentRequired' | 'invalidDocument' | 'documentMismatch' | 'documentUnreadable' | 'documentFieldsMissing' | 'verificationNotConfigured' | 'verificationProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound' | 'profileNotFound' | 'verificationExpired' | 'configurationIncomplete' | 'privacyNoticeOutdated' | 'validationFailed' | 'producePhotoCount' | 'producePhotoTooLarge' | 'produceImageInvalid' | 'produceStorageUnavailable';
+type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'exists' | 'documentRequired' | 'invalidDocument' | 'documentMismatch' | 'documentUnreadable' | 'documentFieldsMissing' | 'verificationNotConfigured' | 'verificationProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound' | 'profileNotFound' | 'verificationExpired' | 'configurationIncomplete' | 'privacyNoticeOutdated' | 'validationFailed' | 'producePhotoCount' | 'producePhotoTooLarge' | 'produceImageInvalid' | 'produceStorageUnavailable' | 'producePriceInvalid' | 'produceNotFound' | 'producePriceAlreadySet' | 'marketPriceUnavailable' | 'marketPriceNotConfigured' | 'marketPriceInvalidKey' | 'marketPriceRateLimited';
 export type FarmerDocumentField = 'name' | 'age' | 'gender' | 'aadhaar' | 'address' | 'date_of_birth';
 
 const farmerDocumentFields: FarmerDocumentField[] = ['name', 'age', 'gender', 'aadhaar', 'address', 'date_of_birth'];
@@ -39,8 +39,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   if (!response.ok) {
     if (response.status === 401) throw new FarmerAuthError('unauthorized');
-    const body = await response.json().catch(() => ({})) as { error?: string; issues?: string[]; fields?: string[]; missingFields?: string[]; suggestedFullName?: string };
-    if ([400, 404, 409, 422, 429, 503].includes(response.status)) {
+    const body = await response.json().catch(() => ({})) as { error?: string; issues?: string[]; fields?: (string | { field?: string })[]; missingFields?: string[]; suggestedFullName?: string };
+    if ([400, 404, 409, 422, 429, 502, 503].includes(response.status)) {
       const mismatchedFields = body.fields?.filter((field): field is FarmerDocumentField => farmerDocumentFields.includes(field as FarmerDocumentField)) ?? [];
       const missingFields = body.missingFields?.filter((field): field is FarmerDocumentField => farmerDocumentFields.includes(field as FarmerDocumentField)) ?? [];
       if (body.error === 'document_mismatch') {
@@ -65,6 +65,13 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       if (body.error === 'produce_image_too_large') throw new FarmerAuthError('producePhotoTooLarge');
       if (body.error === 'invalid_produce_image' || body.error === 'invalid_produce_upload') throw new FarmerAuthError('produceImageInvalid');
       if (body.error === 'produce_image_storage_not_configured' || body.error === 'produce_image_storage_failed') throw new FarmerAuthError('produceStorageUnavailable');
+      if (body.error === 'produce_price_invalid') throw new FarmerAuthError('producePriceInvalid');
+      if (body.error === 'produce_not_found') throw new FarmerAuthError('produceNotFound');
+      if (body.error === 'produce_price_already_set') throw new FarmerAuthError('producePriceAlreadySet');
+      if (body.error === 'market_price_provider_not_configured') throw new FarmerAuthError('marketPriceNotConfigured');
+      if (body.error === 'market_price_api_key_invalid') throw new FarmerAuthError('marketPriceInvalidKey');
+      if (body.error === 'market_price_rate_limited') throw new FarmerAuthError('marketPriceRateLimited');
+      if (['market_price_response_invalid', 'market_price_provider_unavailable'].includes(body.error ?? '')) throw new FarmerAuthError('marketPriceUnavailable');
     }
     throw new FarmerAuthError(response.status === 404 || response.status === 503 ? 'unavailable' : response.status === 409 ? 'exists' : 'rejected');
   }
@@ -138,9 +145,11 @@ export type FarmerProfile = { fullName: string };
 export type FarmerProduce = {
   id: string;
   name: string;
+  nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>;
   quantity: number;
   unit: 'kg' | 'quintal' | 'bunch' | 'pieces';
-  status: 'awaiting_price';
+  pricePerUnit: number | null;
+  status: 'awaiting_price' | 'priced_unpublished';
   photos: { url: string; mimeType: string; size: number; headers: { Authorization: string } }[];
   createdAt: string;
   updatedAt: string;
@@ -159,13 +168,37 @@ export async function getFarmerProduce(signal?: AbortSignal): Promise<FarmerProd
   }));
 }
 
-export async function createFarmerProduce(input: { name: string; quantity: string; unit: FarmerProduce['unit']; photos: { uri: string; mimeType?: string; fileSize?: number }[] }, submissionId: string) {
+export type FarmerMarketComparison = {
+  status: 'available' | 'stale' | 'missing';
+  fetchedAt: string;
+  sourceUnit: 'INR/quintal';
+  source: { name: string; url: string; attribution: string };
+  items: {
+    state: string; district: string; market: string; commodity: string; variety: string | null; grade: string | null;
+    sourceDate: string; stale: boolean; minPrice: number | null; maxPrice: number | null; modalPrice: number | null;
+    priceUnit: string | null; sourceUnit: string; unitCompatible: boolean;
+    askingPriceVsModal: 'below' | 'above' | 'equal' | 'unavailable'; unchangedOnConsecutiveReport: boolean | null;
+  }[];
+};
+
+export async function getFarmerMarketComparison(produceId: string, signal?: AbortSignal): Promise<FarmerMarketComparison> {
+  const tokens = await readTokens();
+  if (!tokens) throw new FarmerAuthError('unauthorized');
+  const result = await request<{ comparison: FarmerMarketComparison }>(`/api/farmer/produce/${encodeURIComponent(produceId)}/market-comparison`, {
+    headers: { Authorization: `Bearer ${tokens.accessToken}` }, signal,
+  });
+  if (!result?.comparison || !Array.isArray(result.comparison.items)) throw new FarmerAuthError('rejected');
+  return result.comparison;
+}
+
+export async function createFarmerProduce(input: { name: string; quantity: string; unit: FarmerProduce['unit']; pricePerUnit: string; photos: { uri: string; mimeType?: string; fileSize?: number }[] }, submissionId: string) {
   const tokens = await readTokens();
   if (!tokens) throw new FarmerAuthError('unauthorized');
   const body = new FormData();
   body.append('name', input.name.trim());
   body.append('quantity', input.quantity);
   body.append('unit', input.unit);
+  body.append('pricePerUnit', input.pricePerUnit);
   for (const [index, photo] of input.photos.entries()) {
     const mimeType = photo.mimeType && ['image/jpeg', 'image/png', 'image/webp'].includes(photo.mimeType) ? photo.mimeType : 'image/jpeg';
     if (Platform.OS === 'web') {
@@ -184,6 +217,20 @@ export async function createFarmerProduce(input: { name: string; quantity: strin
     body,
   });
   return result.item;
+}
+
+export async function updateFarmerProducePrice(produceId: string, pricePerUnit: string): Promise<FarmerProduce> {
+  const tokens = await readTokens();
+  if (!tokens) throw new FarmerAuthError('unauthorized');
+  const result = await request<{ item: Omit<FarmerProduce, 'photos'> & { photos: Omit<FarmerProduce['photos'][number], 'headers'>[] } }>(`/api/farmer/produce/${encodeURIComponent(produceId)}/price`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${tokens.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pricePerUnit }),
+  });
+  return {
+    ...result.item,
+    photos: result.item.photos.map((photo) => ({ ...photo, url: apiUrl(photo.url), headers: { Authorization: `Bearer ${tokens.accessToken}` } })),
+  };
 }
 
 export async function getFarmerProfile(signal?: AbortSignal): Promise<FarmerProfile> {
