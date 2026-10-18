@@ -5,7 +5,7 @@ const SESSION_KEY = 'karavali-fresh.farmer.session.v1';
 const API_BASE = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
 
 type SessionTokens = { accessToken: string; refreshToken?: string };
-type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'testModeDisabled' | 'network' | 'rejected' | 'exists' | 'documentMismatch' | 'documentUnreadable' | 'otpNotConfigured' | 'otpProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound';
+type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'testModeDisabled' | 'network' | 'rejected' | 'exists' | 'documentMismatch' | 'documentUnreadable' | 'verificationNotConfigured' | 'verificationProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound' | 'verificationExpired';
 export class FarmerAuthError extends Error {
   constructor(readonly code: ApiErrorCode) { super(code); }
 }
@@ -36,9 +36,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       const body = await response.json().catch(() => ({})) as { error?: string };
       if (body.error === 'document_mismatch') throw new FarmerAuthError('documentMismatch');
       if (body.error === 'document_unreadable') throw new FarmerAuthError('documentUnreadable');
-      if (body.error === 'otp_provider_not_configured') throw new FarmerAuthError('otpNotConfigured');
-      if (body.error === 'otp_provider_unavailable') throw new FarmerAuthError('otpProviderFailure');
-      if (body.error === 'rate_limit_exceeded' || body.error === 'otp_resend_too_soon') throw new FarmerAuthError('rateLimited');
+      if (body.error === 'phone_verification_provider_not_configured') throw new FarmerAuthError('verificationNotConfigured');
+      if (['verification_provider_unavailable', 'verification_provider_response_invalid', 'verification_request_unavailable', 'verification_credits_exhausted', 'verification_line_not_configured'].includes(body.error ?? '')) throw new FarmerAuthError('verificationProviderFailure');
+      if (body.error === 'verification_expired') throw new FarmerAuthError('verificationExpired');
+      if (body.error === 'rate_limit_exceeded' || body.error === 'verification_resend_too_soon') throw new FarmerAuthError('rateLimited');
       if (body.error === 'ocr_engine_not_configured') throw new FarmerAuthError('ocrUnavailable');
       if (body.error === 'farmer_not_found') throw new FarmerAuthError('farmerNotFound');
     }
@@ -76,10 +77,10 @@ async function clearTokens() {
 
 export type FarmerCapabilities = {
   registrationEnabled: boolean;
-  otpLoginEnabled: boolean;
+  phoneVerificationEnabled: boolean;
   documentComparisonEnabled: boolean;
   ocrEngineConfigured: boolean;
-  otpDeliveryConfigured: boolean;
+  phoneVerificationConfigured: boolean;
   ocrEngineName: string;
   privacyNoticeVersion: string | null;
   privacyNotice: Partial<Record<'en' | 'kn' | 'tcy', string>>;
@@ -159,7 +160,7 @@ export async function submitFarmerRegistration(data: FarmerRegistration, imageUr
   body.append('aadhaar', data.aadhaar);
   body.append('address', data.address);
   body.append('consent', 'true');
-  body.append('smsConsent', 'true');
+  body.append('phoneVerificationConsent', 'true');
   body.append('privacyNoticeVersion', privacyNoticeVersion);
   body.append('document', { uri: imageUri, name: 'identity-document', type: imageType } as never);
   const result = await request<{
@@ -178,27 +179,41 @@ export async function getVerificationStatus(verificationId: string) {
   return request<{
     status: 'pending' | 'failed';
     documentComparison: 'pending' | 'passed' | 'failed';
+    phoneVerificationConsentRequired: boolean;
   }>(
     `/api/farmer/registrations/${encodeURIComponent(verificationId)}/verification`
   );
 }
 
-export async function requestFarmerRegistrationOtp(verificationId: string) {
-  return request<{ challengeId: string }>(`/api/farmer/registrations/${encodeURIComponent(verificationId)}/otp`, {
-    method: 'POST',
+export type FarmerPhoneVerification = { challengeId: string; callNumber: string; instruction: string; expiresAt: string; status: 'pending' };
+export type FarmerPhoneVerificationStatus = { status: 'pending' | 'verified' | 'expired' | 'cancelled'; expiresAt: string };
+
+export async function consentForRegistrationPhoneVerification(verificationId: string) {
+  return request<{ consented: true }>(`/api/farmer/registrations/${encodeURIComponent(verificationId)}/phone-verification-consent`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phoneVerificationConsent: 'true' }),
   });
 }
 
-export async function requestFarmerOtp(phone: string) {
-  return request<{ challengeId: string }>('/api/farmer/auth/otp/request', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone: `+91${phone.replace(/\D/g, '').slice(-10)}` }),
+export async function startFarmerRegistrationPhoneVerification(verificationId: string) {
+  return request<FarmerPhoneVerification>(`/api/farmer/registrations/${encodeURIComponent(verificationId)}/phone-verification`, { method: 'POST' });
+}
+
+export async function startFarmerPhoneVerification(phone: string) {
+  return request<FarmerPhoneVerification>('/api/farmer/auth/phone-verification', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone: `+91${phone.replace(/\D/g, '').slice(-10)}`, phoneVerificationConsent: 'true' }),
   });
 }
 
-export async function verifyFarmerOtp(challengeId: string, otp: string) {
-  const tokens = await request<SessionTokens>('/api/farmer/auth/otp/verify', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ challengeId, otp }),
-  });
+export async function getFarmerPhoneVerificationStatus(challengeId: string) {
+  return request<FarmerPhoneVerificationStatus>(`/api/farmer/auth/phone-verification/${encodeURIComponent(challengeId)}/status`);
+}
+
+export async function cancelFarmerPhoneVerification(challengeId: string) {
+  return request<{ status: 'cancelled' }>(`/api/farmer/auth/phone-verification/${encodeURIComponent(challengeId)}/cancel`, { method: 'POST' });
+}
+
+export async function completeFarmerPhoneVerification(challengeId: string) {
+  const tokens = await request<SessionTokens>(`/api/farmer/auth/phone-verification/${encodeURIComponent(challengeId)}/complete`, { method: 'POST' });
   if (!tokens.accessToken) throw new FarmerAuthError('rejected');
   await saveTokens(tokens);
 }

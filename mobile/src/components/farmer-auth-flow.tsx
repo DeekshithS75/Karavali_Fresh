@@ -1,8 +1,8 @@
 import { File } from 'expo-file-system';
 import * as ImagePicker from 'expo-image-picker';
-import { router } from 'expo-router';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { router, useFocusEffect } from 'expo-router';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { AppState, Linking, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { LanguageSelector } from '@/components/language-selector';
 import { MarketColors, ScreenFrame } from '@/components/marketplace-ui';
@@ -10,22 +10,25 @@ import { useLanguage } from '@/localization/LanguageProvider';
 import type { LanguageCode, TranslationKey } from '@/localization/types';
 import {
   FarmerAuthError,
+  cancelFarmerPhoneVerification,
+  completeFarmerPhoneVerification,
+  consentForRegistrationPhoneVerification,
   getFarmerCapabilities,
+  getFarmerPhoneVerificationStatus,
   getVerificationStatus,
   hasValidFarmerSession,
   lookupFarmerAccount,
   logoutFarmer,
-  requestFarmerOtp,
-  requestFarmerRegistrationOtp,
+  startFarmerPhoneVerification,
+  startFarmerRegistrationPhoneVerification,
   submitFarmerRegistration,
-  verifyFarmerOtp,
   type FarmerCapabilities,
   type FarmerRegistration,
 } from '@/features/farmer-auth/client';
 import { farmerAuthRuntime } from '@/features/farmer-auth/runtime';
 
 type Page = 'entry' | 'register' | 'login' | 'otp' | 'verification';
-type FormErrors = Partial<Record<keyof FarmerRegistration | 'otp' | 'consent' | 'smsConsent' | 'document', TranslationKey>>;
+type FormErrors = Partial<Record<keyof FarmerRegistration | 'consent' | 'phoneVerificationConsent' | 'document', TranslationKey>>;
 type Props = { page: Page };
 
 export function FarmerAuthFlow({ page }: Props) {
@@ -35,13 +38,15 @@ export function FarmerAuthFlow({ page }: Props) {
   const [errors, setErrors] = useState<FormErrors>({});
   const [capabilities, setCapabilities] = useState<FarmerCapabilities | null>(null);
   const [loadingCapabilities, setLoadingCapabilities] = useState(true);
-  const [values, setValues] = useState<FarmerRegistration>({ fullName: '', age: '', gender: '', phone: '', aadhaar: '', address: '' });
-  const [otp, setOtp] = useState('');
+  const [values, setValues] = useState<FarmerRegistration>(() => ({ fullName: '', age: '', gender: '', phone: farmerAuthRuntime.takePhone(), aadhaar: '', address: '' }));
   const [consented, setConsented] = useState(false);
-  const [smsConsented, setSmsConsented] = useState(false);
+  const [phoneVerificationConsented, setPhoneVerificationConsented] = useState(false);
+  const [verificationStatus, setVerificationStatus] = useState<'pending' | 'verified' | 'expired' | 'cancelled' | null>(null);
+  const [phoneVerificationConsentRequired, setPhoneVerificationConsentRequired] = useState(false);
   const [documentUri, setDocumentUri] = useState<string | null>(null);
   const [documentType, setDocumentType] = useState('image/jpeg');
   const documentUriRef = useRef<string | null>(null);
+  const finishingVerificationRef = useRef(false);
 
   useEffect(() => { documentUriRef.current = documentUri; }, [documentUri]);
   useEffect(() => () => {
@@ -65,36 +70,32 @@ export function FarmerAuthFlow({ page }: Props) {
     return () => { active = false; };
   }, [page]);
 
-  useEffect(() => {
-    if (page !== 'register' && page !== 'login') return;
-    const phone = farmerAuthRuntime.takePhone();
-    if (phone) setValues((current) => ({ ...current, phone }));
-  }, [page]);
-
   const update = (field: keyof FarmerRegistration, value: string) => {
     setValues((current) => ({ ...current, [field]: value }));
     setErrors((current) => ({ ...current, [field]: undefined }));
     setNotice(null);
   };
-  const errorText = (error: unknown): TranslationKey => error instanceof FarmerAuthError && error.code === 'network'
+  const errorText = useCallback((error: unknown): TranslationKey => error instanceof FarmerAuthError && error.code === 'network'
     ? 'farmerAuth.networkError'
     : error instanceof FarmerAuthError && error.code === 'documentMismatch'
       ? 'farmerAuth.documentMismatch'
       : error instanceof FarmerAuthError && error.code === 'documentUnreadable'
         ? 'farmerAuth.documentUnreadable'
-      : error instanceof FarmerAuthError && error.code === 'otpNotConfigured'
-        ? 'farmerAuth.otpProviderMissing'
-        : error instanceof FarmerAuthError && error.code === 'otpProviderFailure'
-          ? 'farmerAuth.otpProviderFailure'
+      : error instanceof FarmerAuthError && error.code === 'verificationNotConfigured'
+        ? 'farmerAuth.phoneVerificationProviderMissing'
+        : error instanceof FarmerAuthError && error.code === 'verificationProviderFailure'
+          ? 'farmerAuth.phoneVerificationProviderFailure'
           : error instanceof FarmerAuthError && error.code === 'rateLimited'
             ? 'farmerAuth.rateLimited'
+            : error instanceof FarmerAuthError && error.code === 'verificationExpired'
+              ? 'farmerAuth.phoneVerificationExpired'
         : error instanceof FarmerAuthError && error.code === 'ocrUnavailable'
           ? 'farmerAuth.providerMissing'
           : error instanceof FarmerAuthError && error.code === 'farmerNotFound'
             ? 'farmerAuth.accountNotFound'
     : error instanceof FarmerAuthError && error.code === 'rejected'
-      ? page === 'otp' ? 'farmerAuth.otpRejected' : 'farmerAuth.requestRejected'
-      : 'farmerAuth.backendUnavailable';
+      ? page === 'otp' ? 'farmerAuth.phoneVerificationRejected' : 'farmerAuth.requestRejected'
+      : 'farmerAuth.backendUnavailable', [page]);
   const privacyNotice = capabilities?.privacyNotice[language as LanguageCode] ?? capabilities?.privacyNotice.en;
   const canCollectIdentity = Boolean(
     capabilities?.registrationEnabled && capabilities.documentComparisonEnabled &&
@@ -136,7 +137,7 @@ export function FarmerAuthFlow({ page }: Props) {
     if (!/^\d{12}$/.test(values.aadhaar.replace(/\D/g, ''))) next.aadhaar = 'farmerAuth.error.aadhaar';
     if (!values.address.trim()) next.address = 'farmerAuth.error.address';
     if (!consented) next.consent = 'farmerAuth.error.consent';
-    if (!smsConsented) next.smsConsent = 'farmerAuth.error.smsConsent';
+    if (!phoneVerificationConsented) next.phoneVerificationConsent = 'farmerAuth.error.phoneVerificationConsent';
     if (!documentUri) next.document = 'farmerAuth.error.document';
     setErrors(next);
     return Object.keys(next).length === 0;
@@ -152,6 +153,7 @@ export function FarmerAuthFlow({ page }: Props) {
     try {
       const result = await submitFarmerRegistration(values, documentUri, documentType, capabilities!.privacyNoticeVersion!);
       const failed = result.status === 'failed' || result.documentComparison === 'failed';
+      farmerAuthRuntime.setPhone(values.phone);
       farmerAuthRuntime.setVerification(result.verificationId, failed ? 'failed' : 'pending');
       setValues({ fullName: '', age: '', gender: '', phone: '', aadhaar: '', address: '' });
       setDocumentUri(null);
@@ -170,18 +172,24 @@ export function FarmerAuthFlow({ page }: Props) {
     }
   };
 
-  const sendOtp = async () => {
+  const startLoginVerification = async () => {
     const phone = values.phone.replace(/\D/g, '');
     if (!/^\d{10}$/.test(phone)) {
       setErrors({ phone: 'farmerAuth.error.phone' });
       return;
     }
+    if (!phoneVerificationConsented) {
+      setErrors({ phoneVerificationConsent: 'farmerAuth.error.phoneVerificationConsent' });
+      return;
+    }
     setBusy(true);
     setNotice(null);
     try {
-      const result = await requestFarmerOtp(phone);
+      farmerAuthRuntime.setPhone(phone);
+      const result = await startFarmerPhoneVerification(phone);
       farmerAuthRuntime.setRegistrationOtp(false);
-      farmerAuthRuntime.setOtpChallenge(result.challengeId);
+      farmerAuthRuntime.setPhoneVerification(result);
+      setVerificationStatus('pending');
       router.push('/auth/farmer/otp' as never);
     } catch (error) {
       setNotice(errorText(error));
@@ -209,25 +217,6 @@ export function FarmerAuthFlow({ page }: Props) {
     finally { setBusy(false); }
   };
 
-  const verifyOtp = async () => {
-    const challengeId = farmerAuthRuntime.getOtpChallenge();
-    if (!/^\d{6}$/.test(otp)) { setErrors({ otp: 'farmerAuth.error.otp' }); return; }
-    if (!challengeId) { setNotice('farmerAuth.backendUnavailable'); return; }
-    setBusy(true);
-    setNotice(null);
-    try {
-      await verifyFarmerOtp(challengeId, otp);
-      if (await hasValidFarmerSession()) {
-        farmerAuthRuntime.clearRegistrationOtp();
-        farmerAuthRuntime.takeOtpChallenge();
-        router.replace('/farmer');
-      } else {
-        setNotice('farmerAuth.sessionInvalid');
-      }
-    } catch (error) { setNotice(errorText(error)); }
-    finally { setOtp(''); setBusy(false); }
-  };
-
   const checkVerification = async () => {
     const id = farmerAuthRuntime.getVerification();
     if (!id) { setNotice('farmerAuth.backendUnavailable'); return; }
@@ -239,10 +228,15 @@ export function FarmerAuthFlow({ page }: Props) {
         farmerAuthRuntime.setVerification(id, 'failed');
         setNotice('farmerAuth.verificationFailed');
       } else if (status.documentComparison === 'passed' && status.status === 'pending') {
-        const challenge = await requestFarmerRegistrationOtp(id);
+        if (status.phoneVerificationConsentRequired) {
+          setPhoneVerificationConsentRequired(true);
+          setNotice('farmerAuth.phoneVerificationConsentPrompt');
+          return;
+        }
+        const challenge = await startFarmerRegistrationPhoneVerification(id);
         farmerAuthRuntime.setRegistrationOtp(true);
-        farmerAuthRuntime.setOtpChallenge(challenge.challengeId);
-        farmerAuthRuntime.clearVerification();
+        farmerAuthRuntime.setPhoneVerification(challenge);
+        setVerificationStatus('pending');
         router.replace('/auth/farmer/otp' as never);
       } else if (status.documentComparison === 'pending' || status.status === 'pending') {
         farmerAuthRuntime.setVerification(id, 'pending');
@@ -251,6 +245,94 @@ export function FarmerAuthFlow({ page }: Props) {
     } catch (error) { setNotice(errorText(error)); }
     finally { setBusy(false); }
   };
+
+  const giveRegistrationPhoneVerificationConsent = async () => {
+    const id = farmerAuthRuntime.getVerification();
+    if (!id) { setNotice('farmerAuth.backendUnavailable'); return; }
+    setBusy(true);
+    try {
+      await consentForRegistrationPhoneVerification(id);
+      setPhoneVerificationConsentRequired(false);
+      await checkVerification();
+    } catch (error) { setNotice(errorText(error)); }
+    finally { setBusy(false); }
+  };
+
+  const openDialer = async () => {
+    const info = farmerAuthRuntime.getPhoneVerification();
+    if (!info) return;
+    try { await Linking.openURL(`tel:${info.callNumber.replace(/[^+\d]/g, '')}`); }
+    catch { setNotice('farmerAuth.callUnavailable'); }
+  };
+
+  const finishVerified = useCallback(async (challengeId: string) => {
+    if (finishingVerificationRef.current) return;
+    finishingVerificationRef.current = true;
+    setBusy(true);
+    try {
+      await completeFarmerPhoneVerification(challengeId);
+      if (await hasValidFarmerSession()) {
+        farmerAuthRuntime.clearRegistrationOtp();
+        farmerAuthRuntime.clearPhoneVerification();
+        farmerAuthRuntime.clearVerification();
+        router.replace('/farmer');
+      } else setNotice('farmerAuth.sessionInvalid');
+    } catch (error) { setNotice(errorText(error)); }
+    finally { finishingVerificationRef.current = false; setBusy(false); }
+  }, [errorText]);
+
+  const retryPhoneVerification = async () => {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const registration = farmerAuthRuntime.isRegistrationOtp();
+      const id = farmerAuthRuntime.getVerification();
+      const challenge = registration && id
+        ? await startFarmerRegistrationPhoneVerification(id)
+        : await startFarmerPhoneVerification(farmerAuthRuntime.getPhone());
+      farmerAuthRuntime.setPhoneVerification(challenge);
+      setVerificationStatus('pending');
+    } catch (error) { setNotice(errorText(error)); }
+    finally { setBusy(false); }
+  };
+
+  const cancelPhoneVerificationFlow = async () => {
+    const challenge = farmerAuthRuntime.getPhoneVerification();
+    if (challenge) {
+      setBusy(true);
+      try { await cancelFarmerPhoneVerification(challenge.challengeId); }
+      catch { /* Leaving the screen still stops polling; server expiry remains authoritative. */ }
+      finally { setBusy(false); }
+    }
+    setVerificationStatus('cancelled');
+    farmerAuthRuntime.clearPhoneVerification();
+    router.replace(farmerAuthRuntime.isRegistrationOtp() ? '/auth/farmer/verification' as never : '/auth/farmer/login' as never);
+  };
+
+  useFocusEffect(useCallback(() => {
+    if (page !== 'otp') return undefined;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const challenge = farmerAuthRuntime.getPhoneVerification();
+    if (!challenge) { setNotice('farmerAuth.backendUnavailable'); return undefined; }
+    const poll = async () => {
+      if (!active || verificationStatus === 'expired' || verificationStatus === 'cancelled') return;
+      if (AppState.currentState !== 'active') {
+        timer = setTimeout(() => { void poll(); }, 2500);
+        return;
+      }
+      try {
+        const result = await getFarmerPhoneVerificationStatus(challenge.challengeId);
+        if (!active) return;
+        setVerificationStatus(result.status);
+        if (result.status === 'verified') { await finishVerified(challenge.challengeId); return; }
+        if (result.status === 'expired' || result.status === 'cancelled') return;
+      } catch (error) { if (active) setNotice(errorText(error)); }
+      if (active) timer = setTimeout(() => { void poll(); }, 2500);
+    };
+    void poll();
+    return () => { active = false; if (timer) clearTimeout(timer); };
+  }, [page, verificationStatus, errorText, finishVerified]));
 
   const field = (name: keyof FarmerRegistration, labelKey: TranslationKey, placeholderKey: TranslationKey, options: { keyboard?: 'default' | 'number-pad'; secure?: boolean; maxLength?: number } = {}) => (
     <View style={styles.field} key={name}>
@@ -275,12 +357,12 @@ export function FarmerAuthFlow({ page }: Props) {
   );
 
   const header = <View style={styles.topBar}>
-    <Pressable accessibilityRole="button" accessibilityLabel={t('navigation.back')} onPress={() => router.replace(page === 'entry' ? '/' : page === 'otp' ? farmerAuthRuntime.isRegistrationOtp() ? '/auth/farmer/verification' : '/auth/farmer/login' : '/auth/farmer')} style={styles.back}><Text style={styles.backText}>‹ {t('navigation.back')}</Text></Pressable>
+    <Pressable accessibilityRole="button" accessibilityLabel={t('navigation.back')} onPress={() => page === 'otp' ? void cancelPhoneVerificationFlow() : router.replace(page === 'entry' ? '/' : '/auth/farmer')} style={styles.back}><Text style={styles.backText}>‹ {t('navigation.back')}</Text></Pressable>
     <LanguageSelector />
   </View>;
   const brand = <View style={styles.brand}><View style={styles.brandMark}><Text style={styles.brandGlyph}>❧</Text></View><View><Text style={styles.brandName}>{t('brand.name')}</Text><Text style={styles.brandRegion}>{t('brand.region')}</Text></View></View>;
-  const banner = <View style={styles.demoBanner}><Text style={styles.demoText}>{t(capabilities?.otpLoginEnabled ? 'farmerAuth.secureBanner' : 'farmerAuth.demoBanner')}</Text></View>;
-  const visibleNotice = notice ?? (page === 'otp' && !farmerAuthRuntime.getOtpChallenge() ? 'farmerAuth.backendUnavailable' : null);
+  const banner = <View style={styles.demoBanner}><Text style={styles.demoText}>{t(capabilities?.phoneVerificationEnabled ? 'farmerAuth.secureBanner' : 'farmerAuth.demoBanner')}</Text></View>;
+  const visibleNotice = notice ?? (page === 'otp' && !farmerAuthRuntime.getPhoneVerification() ? 'farmerAuth.backendUnavailable' : null);
   const noticeView = visibleNotice ? <Text accessibilityRole="alert" style={styles.notice}>{t(visibleNotice)}</Text> : null;
   const button = (labelKey: TranslationKey, action: () => void, disabled = false) => <Pressable accessibilityRole="button" disabled={busy || disabled} onPress={action} style={({ pressed }) => [styles.primaryButton, (busy || disabled) && styles.disabled, pressed && styles.pressed]}><Text style={styles.primaryButtonText}>{t(busy ? 'farmerAuth.loading' : labelKey)}</Text></Pressable>;
 
@@ -315,8 +397,8 @@ export function FarmerAuthFlow({ page }: Props) {
       {privacyNotice && capabilities?.ocrEngineConfigured ? <View style={styles.providerDisclosure}><Text style={styles.label}>{capabilities.ocrEngineName}</Text><Text style={styles.help}>{privacyNotice}</Text></View> : null}
       <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: consented }} onPress={() => { if (consented) { update('aadhaar', ''); discardDocument(); } setConsented((value) => !value); setErrors((current) => ({ ...current, consent: undefined })); }} style={styles.consentRow}><View style={[styles.checkbox, consented && styles.checkboxChecked]}>{consented ? <Text style={styles.checkmark}>✓</Text> : null}</View><Text style={styles.consentText}>{t('farmerAuth.consent')}</Text></Pressable>
       {errors.consent ? <Text accessibilityRole="alert" style={styles.error}>{t(errors.consent)}</Text> : null}
-      <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: smsConsented }} onPress={() => { setSmsConsented((value) => !value); setErrors((current) => ({ ...current, smsConsent: undefined })); }} style={styles.consentRow}><View style={[styles.checkbox, smsConsented && styles.checkboxChecked]}>{smsConsented ? <Text style={styles.checkmark}>✓</Text> : null}</View><Text style={styles.consentText}>{t('farmerAuth.smsConsent')}</Text></Pressable>
-      {errors.smsConsent ? <Text accessibilityRole="alert" style={styles.error}>{t(errors.smsConsent)}</Text> : null}
+      <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: phoneVerificationConsented }} onPress={() => { setPhoneVerificationConsented((value) => !value); setErrors((current) => ({ ...current, phoneVerificationConsent: undefined })); }} style={styles.consentRow}><View style={[styles.checkbox, phoneVerificationConsented && styles.checkboxChecked]}>{phoneVerificationConsented ? <Text style={styles.checkmark}>✓</Text> : null}</View><Text style={styles.consentText}>{t('farmerAuth.phoneVerificationConsent')}</Text></Pressable>
+      {errors.phoneVerificationConsent ? <Text accessibilityRole="alert" style={styles.error}>{t(errors.phoneVerificationConsent)}</Text> : null}
       <Text style={styles.label}>{t('farmerAuth.document')}</Text>
       <View style={styles.documentActions}>
         <Pressable accessibilityRole="button" disabled={!consented || !canCollectIdentity || busy} onPress={() => chooseDocument('camera')} style={[styles.secondaryButton, (!consented || !canCollectIdentity) && styles.disabled]}><Text style={styles.linkText}>{t('farmerAuth.captureDocument')}</Text></Pressable>
@@ -334,22 +416,33 @@ export function FarmerAuthFlow({ page }: Props) {
       <Text style={styles.eyebrow}>{t('auth.role.farmer')}</Text><Text style={styles.title}>{t('farmerAuth.loginTitle')}</Text>
       <Text style={styles.intro}>{t('farmerAuth.loginIntro')}</Text>{banner}
       {field('phone', 'farmerAuth.phone', 'farmerAuth.phonePlaceholder', { keyboard: 'number-pad', maxLength: 10 })}
-      {noticeView}{button('farmerAuth.sendOtp', sendOtp)}
+      <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: phoneVerificationConsented }} onPress={() => { setPhoneVerificationConsented((value) => !value); setErrors((current) => ({ ...current, phoneVerificationConsent: undefined })); }} style={styles.consentRow}><View style={[styles.checkbox, phoneVerificationConsented && styles.checkboxChecked]}>{phoneVerificationConsented ? <Text style={styles.checkmark}>✓</Text> : null}</View><Text style={styles.consentText}>{t('farmerAuth.phoneVerificationConsent')}</Text></Pressable>
+      {errors.phoneVerificationConsent ? <Text accessibilityRole="alert" style={styles.error}>{t(errors.phoneVerificationConsent)}</Text> : null}
+      {noticeView}{button('farmerAuth.startPhoneVerification', startLoginVerification)}
     </View> : null}
 
     {page === 'otp' ? <View style={styles.card}>
-      <Text style={styles.eyebrow}>{t('auth.role.farmer')}</Text><Text style={styles.title}>{t('farmerAuth.otpTitle')}</Text>
-      <Text style={styles.intro}>{t('farmerAuth.otpIntro')}</Text>{banner}
-      <Text style={styles.label}>{t('farmerAuth.otp')}</Text>
-      <TextInput accessibilityLabel={t('farmerAuth.otp')} value={otp} onChangeText={(value) => { setOtp(value.replace(/\D/g, '').slice(0, 6)); setErrors({}); }} keyboardType="number-pad" maxLength={6} style={styles.input} placeholder={t('farmerAuth.otpPlaceholder')} placeholderTextColor={MarketColors.muted} />
-      {errors.otp ? <Text accessibilityRole="alert" style={styles.error}>{t(errors.otp)}</Text> : null}
-      {noticeView}{button('farmerAuth.verifyOtp', verifyOtp)}
+      <Text style={styles.eyebrow}>{t('auth.role.farmer')}</Text><Text style={styles.title}>{t('farmerAuth.phoneVerificationTitle')}</Text>
+      <Text style={styles.intro}>{t('farmerAuth.phoneVerificationIntro')}</Text>{banner}
+      {farmerAuthRuntime.getPhoneVerification() ? <View style={styles.callPanel}>
+        <Text style={styles.label}>{t('farmerAuth.callNumber')}</Text>
+        <Text accessibilityRole="text" style={styles.callNumber}>{farmerAuthRuntime.getPhoneVerification()!.callNumber}</Text>
+        <Text style={styles.help}>{farmerAuthRuntime.getPhoneVerification()!.instruction}</Text>
+        <Text style={styles.help}>{t('farmerAuth.callMayEndQuickly')}</Text>
+        <Pressable accessibilityRole="button" disabled={busy} onPress={() => void openDialer()} style={[styles.secondaryButton, busy && styles.disabled]}><Text style={styles.linkText}>{t('farmerAuth.callNow')}</Text></Pressable>
+        <Text accessibilityLiveRegion="polite" style={verificationStatus === 'expired' ? styles.warning : styles.notice}>{t(verificationStatus === 'expired' ? 'farmerAuth.phoneVerificationExpired' : verificationStatus === 'verified' ? 'farmerAuth.phoneVerificationFinishing' : verificationStatus === 'cancelled' ? 'farmerAuth.phoneVerificationCancelled' : 'farmerAuth.phoneVerificationWaiting')}</Text>
+      </View> : null}
+      {noticeView}
+      {verificationStatus === 'expired' ? button('farmerAuth.retryPhoneVerification', retryPhoneVerification) : null}
+      <Pressable accessibilityRole="button" disabled={busy} onPress={() => void cancelPhoneVerificationFlow()} style={styles.returnLink}><Text style={styles.linkText}>{t('farmerAuth.cancelPhoneVerification')}</Text></Pressable>
     </View> : null}
 
     {page === 'verification' ? <View style={styles.card}>
       <Text style={styles.eyebrow}>{t('auth.role.farmer')}</Text><Text style={styles.title}>{t('farmerAuth.verificationTitle')}</Text>
       <Text style={styles.intro}>{t('farmerAuth.verificationIntro')}</Text>{banner}
       {noticeView ?? <Text style={styles.notice}>{t(farmerAuthRuntime.getVerificationState() === 'failed' ? 'farmerAuth.verificationFailed' : 'farmerAuth.verificationPending')}</Text>}
+      {phoneVerificationConsentRequired ? <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: phoneVerificationConsented }} onPress={() => setPhoneVerificationConsented((value) => !value)} style={styles.consentRow}><View style={[styles.checkbox, phoneVerificationConsented && styles.checkboxChecked]}>{phoneVerificationConsented ? <Text style={styles.checkmark}>✓</Text> : null}</View><Text style={styles.consentText}>{t('farmerAuth.phoneVerificationConsent')}</Text></Pressable> : null}
+      {phoneVerificationConsentRequired && phoneVerificationConsented ? button('farmerAuth.confirmPhoneVerificationConsent', giveRegistrationPhoneVerificationConsent) : null}
       {button('farmerAuth.checkStatus', checkVerification)}
     </View> : null}
 
@@ -377,5 +470,6 @@ const styles = StyleSheet.create({
   genderRow: { flexDirection: 'row', gap: 7 }, genderOption: { flex: 1, minHeight: 42, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: MarketColors.border, borderRadius: 12, paddingHorizontal: 5 }, genderSelected: { backgroundColor: MarketColors.greenSoft, borderColor: MarketColors.green }, genderText: { color: MarketColors.text, fontSize: 12, fontWeight: '600' },
   consentRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, paddingVertical: 4 }, checkbox: { width: 22, height: 22, borderRadius: 6, borderWidth: 1, borderColor: MarketColors.green, alignItems: 'center', justifyContent: 'center' }, checkboxChecked: { backgroundColor: MarketColors.green }, checkmark: { color: '#fff', fontSize: 15, fontWeight: '800' }, consentText: { flex: 1, color: MarketColors.text, fontSize: 12, lineHeight: 18 },
   documentActions: { flexDirection: 'row', gap: 9 }, secondaryButton: { flex: 1, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: MarketColors.green, borderRadius: 12, paddingHorizontal: 6 }, providerDisclosure: { borderRadius: 12, backgroundColor: MarketColors.background, padding: 10, gap: 4 },
+  callPanel: { borderRadius: 14, backgroundColor: MarketColors.background, padding: 14, gap: 10 }, callNumber: { color: MarketColors.green, fontSize: 28, fontWeight: '800', textAlign: 'center', letterSpacing: 1.2 },
   primaryButton: { minHeight: 49, alignItems: 'center', justifyContent: 'center', borderRadius: 14, backgroundColor: MarketColors.green, paddingHorizontal: 12 }, primaryButtonText: { color: '#fff', textAlign: 'center', fontSize: 14, fontWeight: '800' }, disabled: { opacity: 0.45 }, pressed: { opacity: 0.72 }, linkText: { color: MarketColors.green, fontSize: 13, fontWeight: '700', textAlign: 'center' }, returnLink: { alignSelf: 'center', padding: 13 }, gate: { flex: 1 }, logoutBar: { alignItems: 'flex-end', marginBottom: 8 }, logoutButton: { minHeight: 40, justifyContent: 'center', paddingHorizontal: 12, borderRadius: 12, backgroundColor: MarketColors.greenSoft },
 });

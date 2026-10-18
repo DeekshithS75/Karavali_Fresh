@@ -1,9 +1,8 @@
 import { Types, type Collection } from 'mongoose';
-import { areSessionSecretsConfigured, config, isOtpConfigured } from '../config.js';
-import { decryptSecretValue } from '../crypto.js';
-import { hashOtpPhone, hmac, randomToken } from '../crypto.js';
+import { areSessionSecretsConfigured, config, isPhoneVerificationConfigured } from '../config.js';
+import { decryptSecretValue, hashPhone, hmac, randomToken } from '../crypto.js';
 import { FarmerModel, OtpChallengeModel, PendingRegistrationModel, RateLimitModel, SessionModel } from '../models/index.js';
-import { getOtpProvider, type OtpPurpose } from '../providers/otp.js';
+import { getPhoneVerificationProvider, normalizeIndianPhone, type PhoneVerificationProvider, type PhoneVerificationPurpose } from '../providers/otp.js';
 import { ProviderNotConfiguredError } from '../providers/errors.js';
 
 export class ApiError extends Error {
@@ -34,55 +33,147 @@ export async function enforceRateLimit(key: string, limit: number, windowMs: num
   }
 }
 
-export async function issueOtp(phone: string, purpose: OtpPurpose, ids: { farmerId?: Types.ObjectId; registrationId?: Types.ObjectId }, provider = getOtpProvider()) {
-  if (!isOtpConfigured()) throw new ProviderNotConfiguredError('otp');
+export type PhoneVerificationStart = {
+  challengeId: string;
+  callNumber: string;
+  instruction: string;
+  expiresAt: string;
+  status: 'pending';
+};
+
+export type PhoneVerificationSnapshot = {
+  status: 'pending' | 'verified' | 'expired' | 'cancelled';
+  expiresAt: string;
+};
+
+export async function startPhoneVerification(
+  phone: string,
+  purpose: PhoneVerificationPurpose,
+  ids: { farmerId?: Types.ObjectId; registrationId?: Types.ObjectId },
+  provider: PhoneVerificationProvider = getPhoneVerificationProvider(),
+): Promise<PhoneVerificationStart> {
+  if (!isPhoneVerificationConfigured()) throw new ProviderNotConfiguredError('otp');
   if (!areSessionSecretsConfigured()) throw new ApiError(503, 'session_signing_not_configured');
-  await enforceRateLimit(`otp:${hashOtpPhone(phone)}`, 3, 15 * 60_000);
+  const normalizedPhone = normalizeIndianPhone(phone);
+  if (!normalizedPhone) throw new ApiError(400, 'invalid_phone');
   const now = new Date();
-  const active = await OtpChallengeModel.findOne({ phoneHash: hashOtpPhone(phone), consumedAt: null, expiresAt: { $gt: now } }).lean().exec() as { createdAt: Date } | null;
-  if (active && now.getTime() - active.createdAt.getTime() < config.OTP_RESEND_SECONDS * 1000) {
-    throw new ApiError(429, 'otp_resend_too_soon');
+  const active = await OtpChallengeModel.findOne({
+    phoneHash: hashPhone(normalizedPhone), status: { $in: ['starting', 'pending', 'verified'] },
+    purpose, ...ids, consumedAt: null, expiresAt: { $gt: now },
+  }).lean().exec() as { _id: Types.ObjectId; createdAt: Date; status: string; callNumber?: string; instruction?: string; expiresAt: Date } | null;
+  if (active && active.status !== 'starting' && active.callNumber && active.instruction) {
+    return {
+      challengeId: String(active._id), callNumber: active.callNumber, instruction: active.instruction,
+      expiresAt: active.expiresAt.toISOString(), status: 'pending',
+    };
   }
-  const delivery = await provider.send(phone, purpose);
-  await OtpChallengeModel.updateMany({ phoneHash: hashOtpPhone(phone), consumedAt: null }, { $set: { consumedAt: now } });
+  if (active) {
+    throw new ApiError(429, 'verification_resend_too_soon');
+  }
+  const latest = await OtpChallengeModel.findOne({ phoneHash: hashPhone(normalizedPhone) }).sort({ createdAt: -1 }).select('createdAt status').lean().exec() as { createdAt: Date; status: string } | null;
+  if (latest && ['starting', 'pending', 'verified'].includes(latest.status) && now.getTime() - latest.createdAt.getTime() < config.PHONE_VERIFICATION_RESEND_SECONDS * 1000) {
+    throw new ApiError(429, 'verification_resend_too_soon');
+  }
+  await enforceRateLimit(`phone-verify:${hashPhone(normalizedPhone)}`, 3, 15 * 60_000);
+
   const challenge = await OtpChallengeModel.create({
-    phoneHash: hashOtpPhone(phone), purpose, ...ids, providerReference: delivery.providerReference,
-    expiresAt: new Date(now.getTime() + config.OTP_TTL_SECONDS * 1000),
-    maxAttempts: config.OTP_MAX_ATTEMPTS, attempts: 0, deliveryStatus: 'sent',
+    phoneHash: hashPhone(normalizedPhone), purpose, ...ids,
+    expiresAt: new Date(now.getTime() + config.PHONE_VERIFICATION_TTL_SECONDS * 1000),
+    consumedAt: null, cancelledAt: null, consentedAt: now, status: 'starting',
   });
+  try {
+    const started = await provider.start(normalizedPhone, String(challenge._id));
+    if (started.phone !== normalizedPhone.slice(3) || started.status !== 'pending') throw new ApiError(502, 'verification_provider_response_invalid');
+    const expiresAt = new Date(Math.min(started.expiresAt.getTime(), now.getTime() + config.PHONE_VERIFICATION_TTL_SECONDS * 1000));
+    if (expiresAt.getTime() <= Date.now()) throw new ApiError(502, 'verification_provider_response_invalid');
+    const updated = await OtpChallengeModel.findOneAndUpdate(
+      { _id: challenge._id, status: 'starting', consumedAt: null },
+      { $set: { providerRequestId: started.requestId, callNumber: started.callNumber, instruction: started.instruction, status: 'pending', expiresAt } },
+      { new: true },
+    );
+    if (!updated) throw new ApiError(503, 'verification_challenge_unavailable');
+    return {
+      challengeId: String(challenge._id), callNumber: started.callNumber, instruction: started.instruction,
+      expiresAt: expiresAt.toISOString(), status: 'pending',
+    };
+  } catch (error) {
+    await OtpChallengeModel.updateOne({ _id: challenge._id, status: 'starting' }, { $set: { status: 'failed', consumedAt: new Date() } });
+    throw error;
+  }
+}
+
+export async function getPhoneVerificationStatus(
+  id: string,
+  provider: PhoneVerificationProvider = getPhoneVerificationProvider(),
+): Promise<PhoneVerificationSnapshot> {
+  if (!Types.ObjectId.isValid(id)) throw new ApiError(404, 'verification_challenge_not_found');
+  const challenge = await OtpChallengeModel.findById(id);
+  if (!challenge) throw new ApiError(404, 'verification_challenge_not_found');
+  if (challenge.status === 'cancelled') return { status: 'cancelled', expiresAt: challenge.expiresAt.toISOString() };
+  if (challenge.status === 'expired' || challenge.status === 'failed') return { status: 'expired', expiresAt: challenge.expiresAt.toISOString() };
+  if (challenge.consumedAt) throw new ApiError(409, 'verification_already_completed');
+  if (challenge.expiresAt <= new Date()) {
+    await OtpChallengeModel.updateOne({ _id: challenge._id, consumedAt: null }, { $set: { status: 'expired', consumedAt: new Date() } });
+    return { status: 'expired', expiresAt: challenge.expiresAt.toISOString() };
+  }
+  if (!challenge.providerRequestId || !['pending', 'verified'].includes(challenge.status)) throw new ApiError(409, 'verification_not_started');
+
+  const phone = await getChallengePhone(challenge);
+  if (!phone) {
+    await OtpChallengeModel.updateOne({ _id: challenge._id, consumedAt: null }, { $set: { status: 'failed', consumedAt: new Date() } });
+    throw new ApiError(409, 'verification_owner_unavailable');
+  }
+  const remote = await provider.status(challenge.providerRequestId);
+  if (remote.requestId !== challenge.providerRequestId || remote.reference !== String(challenge._id) || remote.phone !== phone.slice(3)) {
+    throw new ApiError(502, 'verification_provider_response_invalid');
+  }
+  const status = remote.status === 'expired' || remote.expiresAt <= new Date() ? 'expired' : remote.status;
+  const consumedAt = status === 'expired' ? new Date() : null;
+  await OtpChallengeModel.updateOne(
+    { _id: challenge._id, providerRequestId: remote.requestId, consumedAt: null },
+    { $set: { status, consumedAt } },
+  );
+  return { status, expiresAt: challenge.expiresAt.toISOString() };
+}
+
+export async function completePhoneVerification(id: string, provider: PhoneVerificationProvider = getPhoneVerificationProvider()) {
+  const snapshot = await getPhoneVerificationStatus(id, provider);
+  if (snapshot.status === 'expired') throw new ApiError(410, 'verification_expired');
+  if (snapshot.status === 'cancelled') throw new ApiError(409, 'verification_cancelled');
+  if (snapshot.status !== 'verified') throw new ApiError(409, 'verification_pending');
+  const challenge = await OtpChallengeModel.findOneAndUpdate(
+    { _id: id, status: 'verified', consumedAt: null, expiresAt: { $gt: new Date() } },
+    { $set: { consumedAt: new Date() } }, { new: true },
+  );
+  if (!challenge) throw new ApiError(409, 'verification_already_completed');
   return challenge;
 }
 
-export async function validateOtpChallenge(id: string, code: string, purpose: OtpPurpose, provider = getOtpProvider()) {
-  if (!Types.ObjectId.isValid(id)) throw new ApiError(400, 'invalid_challenge');
+export async function cancelPhoneVerification(id: string) {
+  if (!Types.ObjectId.isValid(id)) throw new ApiError(404, 'verification_challenge_not_found');
   const now = new Date();
-  const challenge = await OtpChallengeModel.findOneAndUpdate({
-    _id: id, purpose, consumedAt: null, expiresAt: { $gt: now }, $expr: { $lt: ['$attempts', '$maxAttempts'] },
-  }, { $inc: { attempts: 1 } }, { new: true });
-  if (!challenge) throw new ApiError(401, 'otp_invalid_or_expired');
-  let phone: string | null = null;
+  const challenge = await OtpChallengeModel.findOneAndUpdate(
+    { _id: id, status: { $in: ['starting', 'pending'] }, consumedAt: null, expiresAt: { $gt: now } },
+    { $set: { status: 'cancelled', cancelledAt: now, consumedAt: now } }, { new: true },
+  );
+  if (!challenge) throw new ApiError(409, 'verification_cannot_be_cancelled');
+  return { status: 'cancelled' as const };
+}
+
+async function getChallengePhone(challenge: { purpose: string; registrationId?: Types.ObjectId | null; farmerId?: Types.ObjectId | null }) {
+  let raw: string | undefined;
   if (challenge.purpose === 'farmer_registration' && challenge.registrationId) {
     const registration = await PendingRegistrationModel.findOne({
-      _id: challenge.registrationId, status: 'document_verified', documentComparisonStatus: 'passed', expiresAt: { $gt: now },
+      _id: challenge.registrationId, status: 'document_verified', documentComparisonStatus: 'passed', expiresAt: { $gt: new Date() },
     }).lean().exec() as { payloadCiphertext: string } | null;
-    if (registration) phone = (JSON.parse(decryptSecretValue(registration.payloadCiphertext)) as { phone?: string }).phone ?? null;
+    if (registration) raw = (JSON.parse(decryptSecretValue(registration.payloadCiphertext)) as { phone?: string }).phone;
   } else if (challenge.purpose === 'farmer_login' && challenge.farmerId) {
-    const farmer = await FarmerModel.findOne({ _id: challenge.farmerId, accountStatus: 'active', phoneVerificationStatus: 'verified', documentComparisonStatus: 'passed' }).select('phone').lean().exec() as { phone: string } | null;
-    phone = farmer?.phone ? toIndiaE164(farmer.phone) : null;
+    const farmer = await FarmerModel.findOne({
+      _id: challenge.farmerId, accountStatus: 'active', phoneVerificationStatus: 'verified', documentComparisonStatus: 'passed',
+    }).select('phone').lean().exec() as { phone: string } | null;
+    raw = farmer?.phone;
   }
-  if (!phone) throw new ApiError(401, 'otp_invalid_or_expired');
-  if (!await provider.verify(phone, code)) throw new ApiError(401, 'otp_invalid_or_expired');
-  const consumed = await OtpChallengeModel.findOneAndUpdate(
-    { _id: challenge._id, consumedAt: null, expiresAt: { $gt: now } },
-    { $set: { consumedAt: now } }, { new: true },
-  );
-  if (!consumed) throw new ApiError(401, 'otp_invalid_or_expired');
-  return challenge;
-}
-
-function toIndiaE164(phone: string) {
-  if (/^\+91[6-9]\d{9}$/.test(phone)) return phone;
-  return /^[6-9]\d{9}$/.test(phone) ? `+91${phone}` : '';
+  return raw ? normalizeIndianPhone(raw) : null;
 }
 
 export async function createSession(farmerId: Types.ObjectId) {

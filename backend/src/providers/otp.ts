@@ -1,75 +1,137 @@
-import { config, isOtpConfigured } from '../config.js';
+import { config } from '../config.js';
 import { ProviderNotConfiguredError } from './errors.js';
 
-export type OtpPurpose = 'farmer_login' | 'farmer_registration';
+export type PhoneVerificationStatus = 'pending' | 'verified' | 'expired';
+export type PhoneVerificationPurpose = 'farmer_login' | 'farmer_registration';
 
-export interface OtpDeliveryProvider {
-  send(phone: string, purpose: OtpPurpose): Promise<{ providerReference?: string }>;
-  verify(phone: string, code: string): Promise<boolean>;
+export type NaCallerStartResult = {
+  requestId: string;
+  phone: string;
+  callNumber: string;
+  instruction: string;
+  status: 'pending';
+  expiresAt: Date;
+};
+
+export type NaCallerStatusResult = {
+  requestId: string;
+  phone: string;
+  reference: string;
+  status: PhoneVerificationStatus;
+  verified: boolean;
+  expiresAt: Date;
+};
+
+export interface PhoneVerificationProvider {
+  start(phone: string, reference: string): Promise<NaCallerStartResult>;
+  status(requestId: string): Promise<NaCallerStatusResult>;
+}
+
+export class NaCallerError extends Error {
+  constructor(readonly code: 'invalid_phone' | 'credits_exhausted' | 'rate_limited' | 'line_not_configured' | 'request_not_found' | 'unavailable' | 'invalid_response') {
+    super(code);
+  }
 }
 
 type Fetcher = typeof fetch;
-type Msg91Response = { type?: unknown; message?: unknown; request_id?: unknown; requestId?: unknown };
+type ProviderPayload = Record<string, unknown>;
+const API_BASE = 'https://api.nacaller.com/api/verify';
 
-/** MSG91 credentials and OTPs stay on the server. Phone is supplied in E.164 and sent to MSG91 without '+'. */
-export class Msg91OtpProvider implements OtpDeliveryProvider {
-  constructor(
-    private readonly authKey: string,
-    private readonly templates: Record<OtpPurpose, string>,
-    private readonly fetcher: Fetcher = fetch,
-  ) {}
+export class NaCallerMissOtpProvider implements PhoneVerificationProvider {
+  constructor(private readonly apiKey: string, private readonly fetcher: Fetcher = fetch) {}
 
-  async send(phone: string, purpose: OtpPurpose) {
-    const url = new URL('https://control.msg91.com/api/v5/otp');
-    url.searchParams.set('template_id', this.templates[purpose]);
-    url.searchParams.set('mobile', msg91Mobile(phone));
-    const payload = await this.call(url, { method: 'POST', body: '{}' });
-    if (String(payload.type ?? '').toLowerCase() !== 'success') throw new Error('otp_provider_unavailable');
-    const reference = payload.request_id ?? payload.requestId;
-    return typeof reference === 'string' ? { providerReference: reference.slice(0, 120) } : {};
+  async start(phone: string, reference: string): Promise<NaCallerStartResult> {
+    const e164 = normalizeIndianPhone(phone);
+    if (!e164 || reference.length > 120) throw new NaCallerError('invalid_phone');
+    const payload = await this.call(`${API_BASE}/start`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone: e164, reference }),
+    });
+    const requestId = requiredText(payload.requestId, 160);
+    const returnedPhone = normalizeProviderPhone(payload.phone);
+    const callNumber = requiredText(payload.callNumber, 80);
+    const instruction = requiredText(payload.instruction, 500);
+    const expiresAt = parseDate(payload.expiresAt);
+    if (!requestId || returnedPhone !== e164.slice(3) || !callNumber || !/^[+\d ()-]+$/.test(callNumber) || !instruction || !expiresAt || payload.status !== 'pending') {
+      throw new NaCallerError('invalid_response');
+    }
+    return { requestId, phone: returnedPhone, callNumber, instruction, status: 'pending', expiresAt };
   }
 
-  async verify(phone: string, code: string) {
-    const url = new URL('https://control.msg91.com/api/v5/otp/verify');
-    url.searchParams.set('mobile', msg91Mobile(phone));
-    url.searchParams.set('otp', code);
-    const payload = await this.call(url, { method: 'GET' });
-    return String(payload.message ?? '').trim().toLowerCase() === 'otp verified success' ||
-      String(payload.type ?? '').toLowerCase() === 'success';
+  async status(requestId: string): Promise<NaCallerStatusResult> {
+    if (!requestId || requestId.length > 160 || !/^[\w-]+$/.test(requestId)) throw new NaCallerError('request_not_found');
+    const payload = await this.call(`${API_BASE}/status/${encodeURIComponent(requestId)}`, {
+      method: 'GET', headers: { Authorization: `Bearer ${this.apiKey}` },
+    });
+    const returnedId = requiredText(payload.requestId, 160);
+    const phone = normalizeProviderPhone(payload.phone);
+    const reference = requiredText(payload.reference, 120);
+    const status = payload.status;
+    const verified = payload.verified;
+    const expiresAt = parseDate(payload.expiresAt);
+    if (returnedId !== requestId || !phone || !reference || !expiresAt ||
+        !['pending', 'verified', 'expired'].includes(String(status)) ||
+        typeof verified !== 'boolean' || verified !== (status === 'verified')) {
+      throw new NaCallerError('invalid_response');
+    }
+    return { requestId, phone, reference, status: status as PhoneVerificationStatus, verified, expiresAt };
   }
 
-  private async call(url: URL, init: { method: 'POST' | 'GET'; body?: string }): Promise<Msg91Response> {
+  private async call(url: string, init: RequestInit): Promise<ProviderPayload> {
     let response: Response;
     try {
-      response = await this.fetcher(url, {
-        method: init.method,
-        headers: { authkey: this.authKey, ...(init.body ? { 'Content-Type': 'application/json' } : {}) },
-        ...(init.body ? { body: init.body } : {}),
-        signal: AbortSignal.timeout(10_000),
-      });
+      response = await this.fetcher(url, { ...init, signal: AbortSignal.timeout(10_000) });
     } catch {
-      throw new Error('otp_provider_unavailable');
+      throw new NaCallerError('unavailable');
     }
-    if (!response.ok) throw new Error('otp_provider_unavailable');
+    let payload: ProviderPayload;
     try {
-      const payload = await response.json() as Msg91Response;
-      if (!payload || typeof payload !== 'object') throw new Error('invalid_response');
-      return payload;
+      payload = await response.json() as ProviderPayload;
     } catch {
-      throw new Error('otp_provider_unavailable');
+      throw new NaCallerError('invalid_response');
     }
+    if (!response.ok) {
+      if (response.status === 400) throw new NaCallerError('invalid_phone');
+      if (response.status === 401) throw new NaCallerError('unavailable');
+      if (response.status === 402) throw new NaCallerError('credits_exhausted');
+      if (response.status === 404) throw new NaCallerError('request_not_found');
+      if (response.status === 429) throw new NaCallerError('rate_limited');
+      if (response.status === 503) throw new NaCallerError('line_not_configured');
+      throw new NaCallerError('unavailable');
+    }
+    return payload;
   }
 }
 
-function msg91Mobile(phone: string) {
-  if (!/^\+91[6-9]\d{9}$/.test(phone)) throw new Error('invalid_phone');
-  return phone.slice(1);
+export function normalizeIndianPhone(value: string): string | null {
+  const digits = value.replace(/\D/g, '');
+  const national = digits.length === 12 && digits.startsWith('91') ? digits.slice(2) : digits;
+  return /^[6-9]\d{9}$/.test(national) ? `+91${national}` : null;
 }
 
-export function getOtpProvider(): OtpDeliveryProvider {
-  if (!isOtpConfigured()) throw new ProviderNotConfiguredError('otp');
-  return new Msg91OtpProvider(config.MSG91_AUTH_KEY!, {
-    farmer_registration: config.MSG91_REGISTRATION_TEMPLATE_ID!,
-    farmer_login: config.MSG91_LOGIN_TEMPLATE_ID!,
-  });
+function normalizeProviderPhone(value: unknown) {
+  if (typeof value !== 'string' && typeof value !== 'number') return null;
+  const digits = String(value).replace(/\D/g, '');
+  const national = digits.length === 12 && digits.startsWith('91') ? digits.slice(2) : digits;
+  return /^[6-9]\d{9}$/.test(national) ? national : null;
+}
+
+function requiredText(value: unknown, max: number) {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= max ? value.trim() : null;
+}
+
+function parseDate(value: unknown) {
+  if (typeof value !== 'string') return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp) : null;
+}
+
+export function isNaCallerConfigured() {
+  return Boolean(config.NACALLER_KEY && config.NACALLER_KEY.length >= 16 && !config.NACALLER_KEY.startsWith('replace-'));
+}
+
+export function getPhoneVerificationProvider(): PhoneVerificationProvider {
+  if (!isNaCallerConfigured()) throw new ProviderNotConfiguredError('otp');
+  return new NaCallerMissOtpProvider(config.NACALLER_KEY!);
 }

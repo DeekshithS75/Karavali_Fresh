@@ -4,12 +4,13 @@ import helmet from 'helmet';
 import mongoose, { Types } from 'mongoose';
 import multer from 'multer';
 import { z } from 'zod';
-import { areSessionSecretsConfigured, config, isOtpConfigured, isRegistrationEncryptionConfigured } from './config.js';
-import { decryptSecretValue, encryptSecretValue, hashAadhaar, hashOtpPhone, hmac } from './crypto.js';
-import { FarmerModel, OtpChallengeModel, PendingRegistrationModel } from './models/index.js';
+import { areSessionSecretsConfigured, config, isPhoneVerificationConfigured, isRegistrationEncryptionConfigured } from './config.js';
+import { decryptSecretValue, encryptSecretValue, hashAadhaar, hashPhone, hmac } from './crypto.js';
+import { FarmerModel, PendingRegistrationModel } from './models/index.js';
 import { compareAadhaarDocument, isOcrConfigured, OCR_ENGINE_NAME, testAadhaarDocument, type OcrTestExpected, type RegistrationDetails } from './providers/ocr.js';
+import { NaCallerError } from './providers/otp.js';
 import { ProviderNotConfiguredError } from './providers/errors.js';
-import { ApiError, assertRegistrationAvailable, createSession, enforceRateLimit, findAuthenticatedFarmer, issueOtp, validateOtpChallenge } from './services/security.js';
+import { ApiError, assertRegistrationAvailable, cancelPhoneVerification, completePhoneVerification, createSession, enforceRateLimit, findAuthenticatedFarmer, getPhoneVerificationStatus, startPhoneVerification } from './services/security.js';
 
 const app = express();
 const upload = multer({
@@ -26,6 +27,7 @@ app.use(express.json({ limit: '16kb' }));
 
 const phoneSchema = z.string().trim().regex(/^\+91[6-9]\d{9}$/, 'invalid_phone');
 const phoneBody = z.object({ phone: phoneSchema });
+const phoneVerificationBody = z.object({ phone: phoneSchema, phoneVerificationConsent: z.literal('true') });
 const registrationSchema = z.object({
   fullName: z.string().trim().min(2).max(120),
   age: z.coerce.number().int().min(18).max(100),
@@ -34,7 +36,7 @@ const registrationSchema = z.object({
   aadhaar: z.string().transform((value) => value.replace(/\D/g, '')).refine((value) => /^\d{12}$/.test(value), 'invalid_aadhaar'),
   address: z.string().trim().min(5).max(500),
   consent: z.literal('true'),
-  smsConsent: z.literal('true'),
+  phoneVerificationConsent: z.literal('true'),
   privacyNoticeVersion: z.string().min(1).max(80),
 });
 const ocrTestSchema = z.object({
@@ -47,16 +49,23 @@ const ocrTestSchema = z.object({
   gender: z.enum(['male', 'female', 'other']),
   address: z.string().trim().min(3).max(500),
 });
-const otpBody = z.object({ challengeId: z.string().min(1), otp: z.string().regex(/^\d{6}$/) });
+const challengeIdSchema = z.string().regex(/^[a-f\d]{24}$/i);
 type PendingFarmerDetails = Omit<RegistrationDetails, 'aadhaar'>;
 
 function sendError(response: Response, error: unknown) {
   if (error instanceof z.ZodError) return response.status(400).json({ error: 'validation_failed', fields: error.issues.map(({ path, message }) => ({ field: path.join('.'), message })) });
   if (error instanceof ApiError) return response.status(error.status).json({ error: error.code });
-  if (error instanceof ProviderNotConfiguredError) return response.status(503).json({ error: error.provider === 'ocr' ? 'ocr_engine_not_configured' : 'otp_provider_not_configured' });
-  if (error instanceof Error && ['ocr_engine_unavailable', 'otp_provider_unavailable'].includes(error.message)) {
-    const provider = error.message.startsWith('ocr') ? 'ocr' : 'otp';
-    return response.status(503).json({ error: provider === 'ocr' ? 'ocr_engine_unavailable' : 'otp_provider_unavailable' });
+  if (error instanceof ProviderNotConfiguredError) return response.status(503).json({ error: error.provider === 'ocr' ? 'ocr_engine_not_configured' : 'phone_verification_provider_not_configured' });
+  if (error instanceof NaCallerError) {
+    if (error.code === 'invalid_phone') return response.status(400).json({ error: 'invalid_phone' });
+    if (error.code === 'credits_exhausted') return response.status(503).json({ error: 'verification_credits_exhausted' });
+    if (error.code === 'rate_limited') return response.status(429).json({ error: 'rate_limit_exceeded' });
+    if (error.code === 'line_not_configured') return response.status(503).json({ error: 'verification_line_not_configured' });
+    if (error.code === 'request_not_found') return response.status(502).json({ error: 'verification_request_unavailable' });
+    return response.status(503).json({ error: 'verification_provider_unavailable' });
+  }
+  if (error instanceof Error && error.message === 'ocr_engine_unavailable') {
+    return response.status(503).json({ error: 'ocr_engine_unavailable' });
   }
   if (error instanceof multer.MulterError || (error instanceof Error && error.message.includes('File type'))) return response.status(400).json({ error: 'invalid_document' });
   if (error instanceof Error && 'code' in error && error.code === 11000) return response.status(409).json({ error: 'farmer_already_registered' });
@@ -68,15 +77,15 @@ app.get('/health', (_request, response) => response.json({ status: 'ok' }));
 
 app.get('/api/farmer/auth/capabilities', (_request, response) => {
   const ocrReady = isOcrConfigured();
-  const otpReady = isOtpConfigured();
+  const phoneVerificationReady = isPhoneVerificationConfigured();
   const secretsReady = areSessionSecretsConfigured() && isRegistrationEncryptionConfigured();
   const privacyNotice = { en: config.PRIVACY_NOTICE_EN, kn: config.PRIVACY_NOTICE_KN, tcy: config.PRIVACY_NOTICE_TCY || config.PRIVACY_NOTICE_EN };
   response.json({
     registrationEnabled: ocrReady && secretsReady,
-    otpLoginEnabled: otpReady && areSessionSecretsConfigured(),
+    phoneVerificationEnabled: phoneVerificationReady && areSessionSecretsConfigured(),
     documentComparisonEnabled: ocrReady,
     ocrEngineConfigured: ocrReady,
-    otpDeliveryConfigured: otpReady,
+    phoneVerificationConfigured: phoneVerificationReady,
     ocrEngineName: ocrReady ? OCR_ENGINE_NAME : '',
     privacyNoticeVersion: config.PRIVACY_NOTICE_VERSION,
     privacyNotice,
@@ -90,7 +99,7 @@ app.post('/api/farmer/auth/lookup', async (request, response) => {
     const { phone } = phoneBody.parse(request.body);
     await enforceRateLimit(`lookup:${hmac(phone)}`, 5, 60 * 60_000);
     await enforceRateLimit(`lookup-ip:${hmac(request.ip ?? 'unknown')}`, 30, 60 * 60_000);
-    const phoneHash = hashOtpPhone(phone);
+    const phoneHash = hashPhone(phone);
     const registered = Boolean(await FarmerModel.exists({ phone: { $in: [phone, phone.slice(3)] }, accountStatus: 'active' }));
     const pending = !registered
       ? await PendingRegistrationModel.findOne({ phoneHash, status: 'document_verified', expiresAt: { $gt: new Date() } }).select('_id').lean().exec() as { _id: Types.ObjectId } | null
@@ -109,7 +118,7 @@ app.post('/api/farmer/registrations', upload.single('document'), async (request,
       const result = await testAadhaarDocument(request.file.buffer, request.file.mimetype, expected);
       return response.status(result.status === 'unreadable' ? 422 : 200).json(result);
     }
-    const data = registrationSchema.parse(request.body) as RegistrationDetails & { consent: 'true'; smsConsent: 'true'; privacyNoticeVersion: string };
+    const data = registrationSchema.parse(request.body) as RegistrationDetails & { consent: 'true'; phoneVerificationConsent: 'true'; privacyNoticeVersion: string };
     if (data.privacyNoticeVersion !== config.PRIVACY_NOTICE_VERSION) throw new ApiError(400, 'privacy_notice_version_mismatch');
     if (!request.file || !request.file.buffer.length) throw new ApiError(400, 'document_required');
     if (!isOcrConfigured()) throw new ProviderNotConfiguredError('ocr');
@@ -117,7 +126,7 @@ app.post('/api/farmer/registrations', upload.single('document'), async (request,
       throw new ApiError(503, 'registration_encryption_not_configured');
     }
     const aadhaarHash = hashAadhaar(data.aadhaar);
-    const phoneHash = hashOtpPhone(data.phone);
+    const phoneHash = hashPhone(data.phone);
     await enforceRateLimit(`registration-ip:${hmac(request.ip ?? 'unknown')}`, 10, 24 * 60 * 60_000);
     await enforceRateLimit(`registration:${phoneHash}`, 3, 24 * 60 * 60_000);
     await PendingRegistrationModel.deleteMany({ expiresAt: { $lte: new Date() }, $or: [{ phoneHash }, { aadhaarHash }] });
@@ -139,7 +148,7 @@ app.post('/api/farmer/registrations', upload.single('document'), async (request,
       status: 'document_verified',
       privacyNoticeVersion: data.privacyNoticeVersion,
       consentedAt: now,
-      smsConsentedAt: now,
+      phoneVerificationConsentedAt: now,
       expiresAt: new Date(now.getTime() + config.REGISTRATION_TTL_HOURS * 60 * 60_000),
     });
     return response.status(201).json({ status: 'pending', documentComparison: 'passed', verificationId: registration.id });
@@ -151,50 +160,79 @@ app.get('/api/farmer/registrations/:id/verification', async (request, response) 
     if (!Types.ObjectId.isValid(request.params.id)) throw new ApiError(404, 'verification_not_found');
     const registration = await PendingRegistrationModel.findById(request.params.id);
     if (!registration || registration.expiresAt <= new Date()) throw new ApiError(404, 'verification_not_found');
-    return response.json({ status: 'pending', documentComparison: registration.documentComparisonStatus });
+    return response.json({ status: 'pending', documentComparison: registration.documentComparisonStatus, phoneVerificationConsentRequired: !registration.phoneVerificationConsentedAt });
   } catch (error) { return sendError(response, error); }
 });
 
-app.post('/api/farmer/registrations/:id/otp', async (request, response) => {
+app.post('/api/farmer/registrations/:id/phone-verification-consent', async (request, response) => {
+  try {
+    if (!Types.ObjectId.isValid(request.params.id)) throw new ApiError(404, 'verification_not_found');
+    z.object({ phoneVerificationConsent: z.literal('true') }).parse(request.body);
+    const registration = await PendingRegistrationModel.findOneAndUpdate(
+      { _id: request.params.id, status: 'document_verified', documentComparisonStatus: 'passed', expiresAt: { $gt: new Date() } },
+      { $set: { phoneVerificationConsentedAt: new Date() } }, { new: true },
+    );
+    if (!registration) throw new ApiError(404, 'verification_not_found');
+    return response.json({ consented: true });
+  } catch (error) { return sendError(response, error); }
+});
+
+app.post('/api/farmer/registrations/:id/phone-verification', async (request, response) => {
   try {
     if (!Types.ObjectId.isValid(request.params.id)) throw new ApiError(404, 'verification_not_found');
     const registration = await PendingRegistrationModel.findById(request.params.id);
     if (!registration || registration.status !== 'document_verified' || registration.expiresAt <= new Date() || registration.documentComparisonStatus !== 'passed') {
       throw new ApiError(409, 'document_comparison_required');
     }
+    if (!registration.phoneVerificationConsentedAt) throw new ApiError(409, 'phone_verification_consent_required');
     if (!areSessionSecretsConfigured()) throw new ApiError(503, 'session_signing_not_configured');
-    if (!isOtpConfigured()) throw new ProviderNotConfiguredError('otp');
-    await enforceRateLimit(`registration-otp-ip:${hmac(request.ip ?? 'unknown')}`, 10, 60 * 60_000);
+    if (!isPhoneVerificationConfigured()) throw new ProviderNotConfiguredError('otp');
+    await enforceRateLimit(`registration-phone-verification-ip:${hmac(request.ip ?? 'unknown')}`, 10, 60 * 60_000);
     const data = JSON.parse(decryptSecretValue(registration.payloadCiphertext)) as PendingFarmerDetails;
-    const challenge = await issueOtp(data.phone, 'farmer_registration', { registrationId: registration._id });
-    return response.status(202).json({ challengeId: challenge.id });
+    const challenge = await startPhoneVerification(data.phone, 'farmer_registration', { registrationId: registration._id });
+    return response.status(202).json(challenge);
   } catch (error) { return sendError(response, error); }
 });
 
-app.post('/api/farmer/auth/otp/request', async (request, response) => {
+app.post('/api/farmer/auth/phone-verification', async (request, response) => {
   try {
-    if (!isOtpConfigured()) throw new ProviderNotConfiguredError('otp');
+    if (!isPhoneVerificationConfigured()) throw new ProviderNotConfiguredError('otp');
     if (!areSessionSecretsConfigured()) throw new ApiError(503, 'session_signing_not_configured');
-    const { phone } = phoneBody.parse(request.body);
-    await enforceRateLimit(`otp-ip:${hmac(request.ip ?? 'unknown')}`, 20, 15 * 60_000);
+    const { phone } = phoneVerificationBody.parse(request.body);
+    await enforceRateLimit(`phone-verification-ip:${hmac(request.ip ?? 'unknown')}`, 20, 15 * 60_000);
     const farmer = await FarmerModel.findOne({ phone: { $in: [phone, phone.slice(3)] }, accountStatus: 'active', phoneVerificationStatus: 'verified', documentComparisonStatus: 'passed' });
     if (!farmer) throw new ApiError(404, 'farmer_not_found');
-    const challenge = await issueOtp(phone, 'farmer_login', { farmerId: farmer._id });
-    return response.status(202).json({ challengeId: challenge.id });
+    const challenge = await startPhoneVerification(phone, 'farmer_login', { farmerId: farmer._id });
+    return response.status(202).json(challenge);
   } catch (error) { return sendError(response, error); }
 });
 
-app.post('/api/farmer/auth/otp/verify', async (request, response) => {
+app.get('/api/farmer/auth/phone-verification/:challengeId/status', async (request, response) => {
   try {
-    if (!isOtpConfigured()) throw new ProviderNotConfiguredError('otp');
+    if (!isPhoneVerificationConfigured()) throw new ProviderNotConfiguredError('otp');
     if (!areSessionSecretsConfigured()) throw new ApiError(503, 'session_signing_not_configured');
-    await enforceRateLimit(`otp-verify-ip:${hmac(request.ip ?? 'unknown')}`, 30, 15 * 60_000);
-    const { challengeId, otp } = otpBody.parse(request.body);
-    const registrationChallenge = Types.ObjectId.isValid(challengeId)
-      ? await OtpChallengeModel.findById(challengeId).select('purpose').lean().exec() as { purpose: string } | null
-      : null;
-    const purpose = registrationChallenge?.purpose === 'farmer_registration' ? 'farmer_registration' : 'farmer_login';
-    const challenge = await validateOtpChallenge(challengeId, otp, purpose);
+    const challengeId = challengeIdSchema.parse(request.params.challengeId);
+    await enforceRateLimit(`phone-verification-status-ip:${hmac(request.ip ?? 'unknown')}`, 120, 60_000);
+    return response.json(await getPhoneVerificationStatus(challengeId));
+  } catch (error) { return sendError(response, error); }
+});
+
+app.post('/api/farmer/auth/phone-verification/:challengeId/cancel', async (request, response) => {
+  try {
+    if (!areSessionSecretsConfigured()) throw new ApiError(503, 'session_signing_not_configured');
+    const challengeId = challengeIdSchema.parse(request.params.challengeId);
+    await enforceRateLimit(`phone-verification-cancel-ip:${hmac(request.ip ?? 'unknown')}`, 20, 60_000);
+    return response.json(await cancelPhoneVerification(challengeId));
+  } catch (error) { return sendError(response, error); }
+});
+
+app.post('/api/farmer/auth/phone-verification/:challengeId/complete', async (request, response) => {
+  try {
+    if (!isPhoneVerificationConfigured()) throw new ProviderNotConfiguredError('otp');
+    if (!areSessionSecretsConfigured()) throw new ApiError(503, 'session_signing_not_configured');
+    const challengeId = challengeIdSchema.parse(request.params.challengeId);
+    await enforceRateLimit(`phone-verification-complete-ip:${hmac(request.ip ?? 'unknown')}`, 30, 15 * 60_000);
+    const challenge = await completePhoneVerification(challengeId);
 
     let farmerId: Types.ObjectId;
     if (challenge.purpose === 'farmer_registration') {
@@ -211,7 +249,7 @@ app.post('/api/farmer/auth/otp/verify', async (request, response) => {
           accountStatus: 'active', documentComparisonStatus: 'passed', phoneVerificationStatus: 'verified',
           phoneVerifiedAt: new Date(), identityVerificationStatus: 'not_performed',
           privacyNoticeVersion: registration.privacyNoticeVersion, consentedAt: registration.consentedAt,
-          smsConsentedAt: registration.smsConsentedAt,
+          phoneVerificationConsentedAt: registration.phoneVerificationConsentedAt,
         }], { session: transaction });
         registration.status = 'completed';
         await registration.save({ session: transaction });
