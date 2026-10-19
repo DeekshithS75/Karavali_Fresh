@@ -93,6 +93,8 @@ export async function storeProducePhotos(uploads: ProducePhotoUpload[], farmerId
   const folder = `karavali-fresh/farmers/${farmerId}/produce/${produceId}`;
   try {
     for (const { upload, metadata } of prepared) {
+      // Sharp reports JPEG as "jpeg"; Cloudinary reports the same format as "jpg".
+      const cloudinaryFormat = metadata.format === 'jpeg' ? 'jpg' : metadata.format;
       const asset = await uploadToCloudinary(upload.buffer, {
         resource_type: 'image',
         type: 'authenticated',
@@ -105,13 +107,14 @@ export async function storeProducePhotos(uploads: ProducePhotoUpload[], farmerId
         publicId: asset.public_id,
         ...(asset.asset_id ? { assetId: asset.asset_id } : {}),
         resourceType: asset.resource_type === 'image' ? 'image' : undefined,
-        format: asset.format,
+        // Keep the app's canonical format (and the Mongoose enum) stable.
+        format: metadata.format,
         ...(asset.width ? { width: asset.width } : {}),
         ...(asset.height ? { height: asset.height } : {}),
         mimeType: metadata.mimeType,
         size: asset.bytes ?? upload.size,
       });
-      if (asset.resource_type !== 'image' || !asset.public_id || asset.format !== metadata.format) throw new Error('Cloudinary returned unexpected asset metadata');
+      if (asset.resource_type !== 'image' || !asset.public_id || asset.format !== cloudinaryFormat) throw new Error('Cloudinary returned unexpected asset metadata');
     }
     return stored;
   } catch {
@@ -120,15 +123,22 @@ export async function storeProducePhotos(uploads: ProducePhotoUpload[], farmerId
   }
 }
 
-export async function deleteProducePhotos(photos: Pick<StoredProducePhoto, 'publicId' | 'resourceType'>[]) {
+export async function deleteProducePhotos(photos: Pick<StoredProducePhoto, 'publicId' | 'resourceType' | 'storageKey'>[]) {
   const cloudPhotos = photos.filter((photo): photo is { publicId: string; resourceType?: 'image' } => Boolean(photo.publicId));
-  if (!cloudPhotos.length) return;
-  try { configureCloudinary(); } catch { return; }
-  await Promise.all(cloudPhotos.map(async ({ publicId, resourceType }) => {
-    try {
-      await cloudinaryClient.uploader.destroy(publicId, { resource_type: resourceType ?? 'image', type: 'authenticated', invalidate: true });
-    } catch { /* best-effort cleanup; do not expose provider errors or credentials */ }
-  }));
+  const legacyPhotos = photos.filter((photo): photo is { storageKey: string } => Boolean(photo.storageKey));
+  let cloudResults: boolean[] = [];
+  if (cloudPhotos.length) {
+    try { configureCloudinary(); } catch { return false; }
+    cloudResults = await Promise.all(cloudPhotos.map(async ({ publicId, resourceType }) => {
+      try {
+        const result = await cloudinaryClient.uploader.destroy(publicId, { resource_type: resourceType ?? 'image', type: 'authenticated', invalidate: true });
+        // Cloudinary's "not found" is a successful, idempotent delete result.
+        return result.result === 'ok' || result.result === 'not found';
+      } catch { return false; /* do not expose provider errors or credentials */ }
+    }));
+  }
+  const legacyResults = await Promise.all(legacyPhotos.map(({ storageKey }) => deleteLegacyProducePhoto(storageKey)));
+  return [...cloudResults, ...legacyResults].every(Boolean);
 }
 
 export function createProducePhotoDeliveryUrl(photo: Pick<StoredProducePhoto, 'publicId' | 'resourceType' | 'format'>) {
@@ -146,6 +156,21 @@ export function createProducePhotoDeliveryUrl(photo: Pick<StoredProducePhoto, 'p
   }
 }
 
+export async function readProducePhoto(photo: Pick<StoredProducePhoto, 'storageKey' | 'publicId' | 'resourceType' | 'format' | 'mimeType'>) {
+  if (photo.storageKey) return readLegacyProducePhoto(photo.storageKey);
+  if (!photo.publicId || !photo.format) throw new ProduceStorageError('not_found');
+  let response: Response;
+  try { response = await fetch(createProducePhotoDeliveryUrl(photo)); }
+  catch { throw new ProduceStorageError('upload_failed'); }
+  if (response.status === 404 || response.status === 410) throw new ProduceStorageError('not_found');
+  if (!response.ok) throw new ProduceStorageError('upload_failed');
+  const mimeType = response.headers.get('content-type')?.split(';', 1)[0]?.trim();
+  if (mimeType !== photo.mimeType) throw new ProduceStorageError('not_found');
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!bytes.length || bytes.length > 8 * 1024 * 1024) throw new ProduceStorageError('not_found');
+  return bytes;
+}
+
 export async function readLegacyProducePhoto(storageKey: string) {
   if (!/^[\da-f-]+\.(?:jpeg|png|webp)$/i.test(storageKey)) throw new ProduceStorageError('not_found');
   try { return await readFile(resolve(legacyDirectory, storageKey)); }
@@ -155,6 +180,6 @@ export async function readLegacyProducePhoto(storageKey: string) {
 export async function deleteLegacyProducePhoto(storageKey: string) {
   if (!/^[\da-f-]+\.(?:jpeg|png|webp)$/i.test(storageKey)) return false;
   try { await unlink(resolve(legacyDirectory, storageKey)); return true; }
-  catch { return false; /* local cleanup is best-effort after DB migration */ }
+  catch (error) { return error instanceof Error && 'code' in error && error.code === 'ENOENT'; }
 }
 

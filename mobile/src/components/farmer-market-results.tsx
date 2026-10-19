@@ -7,11 +7,8 @@ type Props = { comparison: FarmerMarketComparison; t: (key: TranslationKey) => s
 
 export function FarmerMarketResults({ comparison, t, language }: Props) {
   const item = comparison.items[0];
-  if (comparison.status === 'missing' || !item) {
-    return <View style={styles.panel}><Text style={styles.message}>{t('farmer.prices.unavailableVegetable')}</Text></View>;
-  }
-  if (!item.unitCompatible || item.modalPrice === null || !item.priceUnit) {
-    return <View style={styles.panel}><Text style={styles.message}>{t('farmer.prices.unitUnavailable')}</Text></View>;
+  if (comparison.status === 'missing' || !item || !item.unitCompatible || item.modalPrice === null || !item.priceUnit) {
+    return <View style={styles.panel}><Text style={styles.message}>{t('farmer.prices.noReference')}</Text></View>;
   }
   const currency = new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', {
     style: 'currency', currency: 'INR', maximumFractionDigits: 2,
@@ -21,9 +18,7 @@ export function FarmerMarketResults({ comparison, t, language }: Props) {
 
   return <View style={styles.panel}>
     <Text style={styles.price}>{t('farmer.prices.simpleMandiPrice').replace('{price}', currency).replace('{unit}', t(`produce.priceUnit.${unit}` as TranslationKey))}</Text>
-    {item.fallbackLevel === 'other_karnataka' ? <Text style={styles.secondary}>{t('farmer.prices.regionalReference')}</Text> : null}
-    {item.stale ? <Text style={styles.warning}>{t('farmer.prices.staleReference').replace('{date}', date)}</Text> : <Text style={styles.secondary}>{t('farmer.prices.reportedDate').replace('{date}', date)}</Text>}
-    {comparison.truncated ? <Text style={styles.warning}>{t('farmer.prices.nearestUnconfirmed')}</Text> : null}
+    <Text style={styles.secondary}>{t('farmer.prices.reportedDate').replace('{date}', date)}{item.fallbackLevel === 'other_karnataka' ? ` · ${t('farmer.prices.regionalReference')}` : ''}</Text>
   </View>;
 }
 

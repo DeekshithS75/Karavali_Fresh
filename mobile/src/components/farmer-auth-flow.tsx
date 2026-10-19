@@ -454,12 +454,10 @@ export function FarmerAuthFlow({ page }: Props) {
       </View> : null}
       {!loadingCapabilities && !capabilityError && capabilities && !capabilities.sessionSigningConfigured ? <View style={styles.providerDisclosure}>
         <Text accessibilityRole="alert" style={styles.warningText}>{t('farmerAuth.backendConfigurationIncomplete')}</Text>
-        {capabilities.missingConfiguration?.length ? <Text selectable style={styles.help}>{capabilities.missingConfiguration.join(', ')}</Text> : null}
         {button('farmerAuth.retrySession', retryFarmerEntry)}
       </View> : null}
       {!loadingCapabilities && !capabilityError && capabilities?.sessionSigningConfigured && !capabilities.phoneVerificationConfigured ? <View style={styles.providerDisclosure}>
         <Text accessibilityRole="alert" style={styles.warningText}>{t('farmerAuth.phoneVerificationProviderMissing')}</Text>
-        {capabilities.missingConfiguration?.length ? <Text selectable style={styles.help}>{capabilities.missingConfiguration.join(', ')}</Text> : null}
         {button('farmerAuth.retrySession', retryFarmerEntry)}
       </View> : null}
       {!loadingCapabilities && !capabilityError && capabilities?.sessionSigningConfigured && capabilities.phoneVerificationConfigured && (entrySessionState === 'missing' || entrySessionState === 'invalid') ? <>

@@ -1,5 +1,5 @@
-import { AuthFlowScreen } from '@/components/auth-flow-screen';
+import { ConsumerAuthScreen } from '@/components/consumer-auth-screen';
 
 export default function AuthRoute() {
-  return <AuthFlowScreen role="consumer" page="forgot-password" />;
+  return <ConsumerAuthScreen page="forgot-password" />;
 }

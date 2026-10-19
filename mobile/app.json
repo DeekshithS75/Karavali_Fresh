@@ -36,7 +36,7 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Allow Karavali Fresh to capture this produce location once, so buyers can find nearby produce. Location is optional and is not tracked in the background."
+          "locationWhenInUsePermission": "Allow Karavali Fresh to use your location only when you choose to capture a produce location or find nearby listings. Location is optional and is never tracked in the background."
         }
       ],
       [
@@ -49,6 +49,7 @@
       ],
       "expo-font",
       "expo-image",
+      "expo-notifications",
       "expo-status-bar",
       "expo-web-browser",
       "expo-secure-store",

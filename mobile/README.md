@@ -25,6 +25,16 @@ In the output, you'll find options to open the app in a
 
 ## Farmer produce entry
 
+## Consumer account and dashboard
+
+Choose **Continue as Consumer** on the welcome screen, create an account with an email address and a password of at least 10 characters, or sign in. Consumer credentials are sent only to the backend; the returned token is stored in SecureStore on Android/iOS and validated when the dashboard opens. Logout revokes the server session. The backend does not yet send email verification or password-reset messages, so password recovery is not available.
+
+The dashboard reads only published Farmer listings. A complete Farmer submission includes the farmer's asking price and is published by the backend as part of the final save. Listings without a valid asking price remain private drafts; the mandi reference is optional guidance and is never used as the selling price. Setting a price on an older unpriced draft publishes it. There is no second Publish action on the dashboard.
+
+Consumers can search and browse paginated listings, open a product detail screen, request an available quantity, and see an AGMARKNET reference price when a fresh compatible report exists. The farmer's asking price remains clearly separate. Nearby browse asks for foreground location permission and a distance of 5, 10, 25, 50, or 100 km; Farmer GPS coordinates and contact details are never included in public listing responses.
+
+Farmer request updates are persisted in the Notifications screen. Push token registration and server delivery use Expo Push Service, but this repository has no EAS project ID or configured device credentials. Push registration therefore remains inactive until the app is linked to an EAS project and installed as a development/release build. Expo Go on Android does not support remote push delivery for this SDK. Background or closed-app delivery has not been verified on a physical device.
+
 Produce photos are captured through the camera; this flow does not offer photo-library imports. Produce name dictation uses `expo-speech-recognition` and requires a native development build. It is not available in Expo Go. After installing dependencies and adding the config plugin, create or rebuild the development client:
 
 ```bash
@@ -38,12 +48,12 @@ The web preview uses browser speech recognition where supported. If recognition 
 
 The development API listens on all network interfaces at port `4000`. To let another device on your Wi-Fi use the app:
 
-1. Keep this computer and your friend's device on the same Wi-Fi network. Guest Wi-Fi or client isolation can block device-to-device access.
-2. Find this computer's current LAN IPv4 address (currently `10.183.233.103`) and set `EXPO_PUBLIC_API_URL=http://<LAN-IP>:4000` in `mobile/.env`.
-3. Start the backend with `cd ../backend && npm run dev`, then start Expo from `mobile` with `npx expo start --host lan`.
-4. On your friend's device, open `http://<LAN-IP>:8081` in a browser. For a native app, install a development APK built with that same `EXPO_PUBLIC_API_URL` value.
+1. Keep the computer and phone on the same Wi-Fi or USB-tether network. Guest Wi-Fi, client isolation, or the computer firewall can block device-to-device access.
+2. Find the computer's current IPv4 address with `ip -4 route get 1.1.1.1` and set `EXPO_PUBLIC_API_URL=http://<address>:4000` in the ignored `mobile/.env`. Do not use `localhost` for a phone.
+3. Start the backend from `backend` with `npm run dev`, then start Expo from `mobile` with `npx expo start --host lan -c` so Metro reloads the environment value.
+4. Confirm `http://<address>:4000/health` returns `{"status":"ok"}` from the phone's browser, then open the Expo app. A standalone native build must be rebuilt with the same API URL.
 
-The LAN address can change when the computer reconnects to Wi-Fi. This is local-network access; devices outside this Wi-Fi need a deployed HTTPS app and API.
+The LAN address can change when the computer reconnects to Wi-Fi. This is local-network access; devices outside this network need a deployed HTTPS API.
 
 You can start developing by editing the files inside the **src/app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
 

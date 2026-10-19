@@ -8,6 +8,7 @@ import { LanguageSelector } from '@/components/language-selector';
 import { useLanguage } from '@/localization/LanguageProvider';
 import { getFarmerSessionState } from '@/features/farmer-auth/client';
 import type { FarmerSessionState } from '@/features/farmer-auth/session-lifecycle';
+import { getConsumerSessionState } from '@/features/consumer-auth/client';
 
 const colors = {
   green: '#287A49',
@@ -28,6 +29,16 @@ export default function WelcomeScreen() {
   const { t } = useLanguage();
   const [restoringFarmer, setRestoringFarmer] = useState(true);
   const [sessionState, setSessionState] = useState<FarmerSessionState>('missing');
+  const [checkingConsumer, setCheckingConsumer] = useState(false);
+
+  const continueAsConsumer = async () => {
+    setCheckingConsumer(true);
+    try {
+      const state = await getConsumerSessionState();
+      router.replace(state === 'valid' ? '/consumer' : '/auth/consumer/login');
+    } catch { router.replace('/auth/consumer/login'); }
+    finally { setCheckingConsumer(false); }
+  };
 
   const retrySessionRestore = async () => {
     setRestoringFarmer(true);
@@ -113,8 +124,8 @@ export default function WelcomeScreen() {
               title={t('welcome.consumerButton')}
               subtitle={t('welcome.consumerSubtitle')}
               icon="🧺"
-              onPress={() => router.push('/auth/consumer/login')}
-              disabled={restoringFarmer}
+              onPress={() => void continueAsConsumer()}
+              disabled={checkingConsumer}
             />
             <Text style={styles.footerNote}>{t('welcome.footer')}</Text>
           </View>

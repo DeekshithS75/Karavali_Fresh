@@ -1,14 +1,15 @@
 import mongoose from 'mongoose';
 import app from './app.js';
 import { config, validateRuntimeConfig } from './config.js';
-import { FarmerModel, MarketPriceObservationModel, OtpChallengeModel, PendingRegistrationModel, ProduceModel, RateLimitModel, SessionModel } from './models/index.js';
+import { ConsumerModel, ConsumerSessionModel, FarmerModel, MarketPriceObservationModel, NotificationModel, OtpChallengeModel, PendingRegistrationModel, ProduceModel, ProduceRequestModel, PushTokenModel, RateLimitModel, SessionModel } from './models/index.js';
 import { initializeOcr, shutdownOcr } from './providers/ocr.js';
 
 async function start() {
   validateRuntimeConfig();
   if (!config.MONGODB_URI) throw new Error('MONGODB_URI is required to start the Farmer API');
   await mongoose.connect(config.MONGODB_URI, { autoIndex: false, serverSelectionTimeoutMS: 10_000 });
-  await Promise.all([FarmerModel, MarketPriceObservationModel, OtpChallengeModel, PendingRegistrationModel, ProduceModel, RateLimitModel, SessionModel].map((model) => model.init()));
+  await Promise.all([ConsumerModel, ConsumerSessionModel, FarmerModel, MarketPriceObservationModel, NotificationModel, OtpChallengeModel, PendingRegistrationModel, ProduceModel, ProduceRequestModel, PushTokenModel, RateLimitModel, SessionModel].map((model) => model.init()));
+  await Promise.all([NotificationModel.createIndexes(), ProduceRequestModel.createIndexes(), PushTokenModel.createIndexes()]);
   try {
     await initializeOcr();
   } catch {

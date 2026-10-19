@@ -1,8 +1,22 @@
-# Karavali Fresh Farmer API
+# Karavali Fresh API
 
 Node.js + TypeScript + Express API for Farmer authentication and farmer-owned market-price comparison. The Expo app remains under `../mobile`.
 
+## Consumer accounts and public listings
+
+Consumer accounts use backend-managed email and password credentials. Passwords are stored as scrypt hashes, and Consumer sessions use a separate MongoDB collection from Farmer sessions. The app stores the opaque session token in SecureStore on native devices and validates it with the API on restart. This initial flow does not send email, verify email ownership, or provide password reset; those flows require an email delivery provider and are not represented as complete.
+
+Consumers browse only produce with `status: published`, positive available quantity, and a positive Farmer asking price and price unit. A complete Farmer create request that includes a valid asking price is published by the backend during that save. A missing price leaves the record in `awaiting_price`; setting the asking price on an older unpriced draft publishes it. Existing priced drafts are not bulk-published. Unpublishing returns a record to `priced_unpublished`.
+
+`GET /api/consumer/produce` requires a Consumer session and accepts bounded `search`, `page`, `limit` (maximum 30), `sort=newest|nearby`, and `distanceKm` (1–100) parameters. Nearby sorting requires a Consumer location accurate to 1 km or better and applies the radius in MongoDB's geospatial query; it returns only coarse distance bands. Results include the Farmer's asking price and a fresh compatible AGMARKNET comparison when available, otherwise a null comparison. `GET /api/consumer/produce/:produceId` returns the same safe price/location summary, account display name, and authenticated photo paths. Farmer coordinates, account/contact details, and Cloudinary asset identifiers are never included in browse or detail responses. Consumer photo paths require a Consumer session; the API reads Cloudinary `authenticated` images and streams the bytes without returning a Cloudinary URL or asset identifier.
+
 ## Start locally
+
+Buyer requests are stored in `ProduceRequest` and create persistent role-scoped `Notification` records. A Farmer decision runs in a MongoDB transaction with the conditional stock decrement; requests never reserve quantity while pending. If an acceptance consumes the final stock, the listing becomes `priced_unpublished` and other pending requests are cancelled. Deleting or unpublishing a listing also cancels pending requests and notifies their buyers. MongoDB transactions require a replica set (Atlas is supported); standalone MongoDB deployments cannot use this workflow.
+
+`POST /api/consumer/produce/:produceId/requests`, `GET /api/consumer/requests`, and `GET /api/consumer/notifications` require Consumer sessions. The request body can include a UUID `requestKey`; the server enforces uniqueness per buyer so a retry returns the existing request and does not create a duplicate notification. Farmer request listing and decisions use `/api/farmer/requests`; role-specific notification history is paginated at `/api/consumer/notifications` and `/api/farmer/notifications`. Accepted buyer requests may include only the Farmer display name and phone number; these remain hidden for pending, rejected, and cancelled requests. Buyers and Farmers can mark only their own notifications read.
+
+`POST` and `DELETE /api/{consumer|farmer}/push-tokens` register or remove an Expo push token for the authenticated role and account. Request/decision notifications are committed to MongoDB first; the backend then sends privacy-safe summaries through Expo Push Service. Expo transport failures do not roll back in-app notifications, and tokens reported as `DeviceNotRegistered` are disabled. The mobile app still needs an EAS project ID, a native development/release build, and platform push credentials before remote pushes can be registered or physically verified.
 
 1. Copy `.env.example` to `.env`. Set `MONGODB_URI` to a MongoDB Atlas replica-set URI.
 2. Generate independent random secrets for `TOKEN_HMAC_SECRET`, `PHONE_HASH_SECRET`, and `AADHAAR_HASH_SECRET`. Generate a random 32-byte key and base64 encode it for `AADHAAR_ENCRYPTION_KEY_BASE64`.

@@ -115,23 +115,13 @@ export default function FarmerAddPriceScreen() {
     <View style={styles.card}>
       <Text style={styles.eyebrow}>{t('produce.farmerOnly')}</Text>
       <Text style={styles.title}>{t('produce.addPriceTitle')}</Text>
-      <Text style={styles.intro}>{t('produce.addPriceIntro')}</Text>
       {loading ? <View style={styles.loading}><ActivityIndicator color={MarketColors.green} /><Text style={styles.help}>{t('produce.listingLoading')}</Text></View> : error && !item ? <View style={styles.errorBox}>
         <Text accessibilityRole="alert" style={styles.error}>{t(error as Parameters<typeof t>[0])}</Text>
         <Pressable accessibilityRole="button" onPress={retryLoad} style={styles.retry}><Text style={styles.retryText}>{t('produce.listingRetry')}</Text></Pressable>
       </View> : item ? <>
         <Text style={styles.name}>{item.nameTranslations?.[language]?.trim() || item.name}</Text>
         <Text style={styles.help}>{t('produce.availableQuantity').replace('{quantity}', String(item.quantity)).replace('{unit}', t(`produce.unit.${item.unit}` as Parameters<typeof t>[0]))}</Text>
-        <View style={styles.marketQuoteBox}>
-          <Text style={styles.label}>{t('farmer.prices.beforePriceTitle')}</Text>
-          <Text style={styles.help}>{t('farmer.prices.beforePriceHelp')}</Text>
-          <Pressable accessibilityRole="button" disabled={marketQuoteLoading || saving} onPress={() => void showMarketQuote()} style={[styles.quoteButton, (marketQuoteLoading || saving) && styles.disabled]}>
-            {marketQuoteLoading ? <ActivityIndicator color={MarketColors.green} /> : <Text style={styles.quoteButtonText}>{t(marketQuote ? 'farmer.prices.retry' : 'farmer.prices.quoteButton')}</Text>}
-          </Pressable>
-          {marketQuoteLoading ? <Text style={styles.help}>{t('farmer.prices.quoteLoading')}</Text> : null}
-          {marketQuoteError ? <Text accessibilityRole="alert" style={styles.error}>{t(marketQuoteError as Parameters<typeof t>[0])}</Text> : null}
-          {marketQuote ? <FarmerMarketResults comparison={marketQuote} t={t} language={language} /> : null}
-        </View>
+        <View style={styles.marketQuoteBox}><Text style={styles.label}>{t('farmer.prices.shortReference')}</Text>{marketQuoteLoading ? <ActivityIndicator color={MarketColors.green} /> : marketQuote ? <FarmerMarketResults comparison={marketQuote} t={t} language={language} /> : <Text style={styles.help}>{t('farmer.prices.noReference')}</Text>}{marketQuoteError ? <Text accessibilityRole="alert" style={styles.error}>{t('farmer.prices.quoteError')}</Text> : null}<Pressable accessibilityRole="button" disabled={marketQuoteLoading || saving} onPress={() => void showMarketQuote()}><Text style={styles.quoteButtonText}>{t('farmer.prices.retry')}</Text></Pressable></View>
         <View style={styles.field}>
           <Text style={styles.label}>{t('produce.sellingPrice')} *</Text>
           <View style={styles.priceRow}><Text style={styles.currency}>₹</Text><TextInput editable={!saving} value={price} onChangeText={(value) => { setPrice(value.replace(/[^\d.]/g, '')); setError(null); }} keyboardType="decimal-pad" inputMode="decimal" placeholder={t('produce.pricePlaceholder')} placeholderTextColor={MarketColors.muted} accessibilityLabel={`${t('produce.sellingPrice')} ${t(`produce.priceUnit.${item.unit}` as Parameters<typeof t>[0])}`} style={styles.input} /><Text style={styles.unit}>/ {t(`produce.priceUnit.${item.unit}` as Parameters<typeof t>[0])}</Text></View>

@@ -5,10 +5,9 @@ import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 
-import { BrandHeader, MarketColors, ScreenFrame, SectionHeading } from '@/components/marketplace-ui';
+import { BrandHeader, MarketColors, ScreenFrame } from '@/components/marketplace-ui';
 import { FarmerDashboardGuard } from '@/components/farmer-auth-flow';
 import { FarmerAuthError, createFarmerProduce, getFarmerMarketQuote, getFarmerSessionState, type FarmerMarketComparison, type FarmerProduce } from '@/features/farmer-auth/client';
-import { FarmerMarketResults } from '@/components/farmer-market-results';
 import { speechRecognition } from '@/features/produce/speech-recognition';
 import { useLanguage } from '@/localization/LanguageProvider';
 
@@ -20,13 +19,15 @@ type ProduceLocation = NonNullable<FarmerProduce['location']>;
 type FormError = 'nameRequired' | 'nameTooLong' | 'quantityInvalid' | 'priceInvalid' | 'photoCount' | 'photoTooLarge' | 'photoInvalid' | null;
 
 function createSubmissionId() {
-  const part = () => Math.random().toString(16).slice(2).padEnd(8, '0').slice(0, 8);
-  return `${part()}-${part()}-4${part().slice(1, 4)}-a${part().slice(1, 4)}-${part()}${part().slice(0, 4)}`;
+  const hex = (length: number) => Math.random().toString(16).slice(2).padEnd(length, '0').slice(0, length);
+  const variant = ['8', '9', 'a', 'b'][Math.floor(Math.random() * 4)];
+  return `${hex(8)}-${hex(4)}-4${hex(3)}-${variant}${hex(3)}-${hex(8)}${hex(4)}`;
 }
 
 export default function FarmerAddProduceScreen() {
   const { t, language } = useLanguage();
   const [name, setName] = useState('');
+  const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
   const [quantity, setQuantity] = useState('');
   const [pricePerUnit, setPricePerUnit] = useState('');
   const [unit, setUnit] = useState<FarmerProduce['unit']>('kg');
@@ -189,8 +190,8 @@ export default function FarmerAddProduceScreen() {
     const parsedQuantity = Number(quantity);
     if (!quantity.trim() || !Number.isFinite(parsedQuantity) || parsedQuantity <= 0) { setFormError('quantityInvalid'); return; }
     const parsedPrice = pricePerUnit.trim() ? Number(pricePerUnit) : null;
-    if (parsedPrice !== null && (!Number.isFinite(parsedPrice) || parsedPrice <= 0)) { setFormError('priceInvalid'); return; }
-    if (photos.length < 2 || photos.length > 5) { setFormError('photoCount'); return; }
+    if (parsedPrice === null || !Number.isFinite(parsedPrice) || parsedPrice <= 0) { setFormError('priceInvalid'); return; }
+    if (photos.length > 5) { setFormError('photoCount'); return; }
     if (photos.some((photo) => photo.fileSize && photo.fileSize > MAX_IMAGE_SIZE)) { setFormError('photoTooLarge'); return; }
     if (photos.some((photo) => photo.mimeType && !photoMimeTypes.includes(photo.mimeType))) { setFormError('photoInvalid'); return; }
     setSaving(true);
@@ -204,95 +205,109 @@ export default function FarmerAddProduceScreen() {
       else if (error instanceof Error && error.message === 'producePhotoTooLarge') setFormError('photoTooLarge');
       else if (error instanceof Error && error.message === 'produceImageInvalid') setSubmitError('produce.uploadInvalid');
       else if (error instanceof Error && error.message === 'produceStorageUnavailable') setSubmitError('produce.storageUnavailable');
+      else if (error instanceof FarmerAuthError && error.code === 'produceStorageUploadFailed') setSubmitError('produce.storageUploadFailed');
+      else if (error instanceof FarmerAuthError && error.code === 'validationFailed') {
+        setSubmitError(error.validationDetails.length
+          ? t('produce.serverValidationDetails').replace('{details}', error.validationDetails.join('; '))
+          : t('produce.serverRejected').replace('{code}', error.serverError ?? 'validation_failed'));
+      }
+      else if (error instanceof FarmerAuthError && error.code === 'producePriceInvalid') setFormError('priceInvalid');
+      else if (error instanceof FarmerAuthError && error.code === 'produceRequestRejected') {
+        setSubmitError(t('produce.serverRejected').replace('{code}', error.serverError ?? 'unknown'));
+      }
+      else if (error instanceof FarmerAuthError && error.code === 'network') setSubmitError('produce.networkError');
+      else if (error instanceof FarmerAuthError && ['apiUrlMissing', 'urlNotAllowed'].includes(error.code)) setSubmitError('produce.apiConfigurationError');
+      else if (error instanceof FarmerAuthError) setSubmitError(t('produce.serverRejected').replace('{code}', error.code));
       else setSubmitError('produce.saveError');
     } finally { setSaving(false); }
   };
 
   const translatedFormError = formError ? t(`produce.validation.${formError}` as Parameters<typeof t>[0]) : null;
 
-  return <FarmerDashboardGuard>
-    <ScreenFrame>
-      <BrandHeader role="Farmer" />
-      <Pressable accessibilityRole="button" onPress={() => router.replace('/farmer')} style={styles.backButton}>
-        <Text style={styles.backText}>‹ {t('navigation.back')}</Text>
-      </Pressable>
-      <View style={styles.card}>
-        <Text style={styles.eyebrow}>{t('produce.farmerOnly')}</Text>
-        <Text style={styles.title}>{t('produce.addTitle')}</Text>
-        <Text style={styles.intro}>{t('produce.addIntro')}</Text>
+  const continueFromName = () => {
+    if (!name.trim()) { setFormError('nameRequired'); return; }
+    if (name.trim().length > 120) { setFormError('nameTooLong'); return; }
+    setFormError(null);
+    setStep(2);
+    void capturePhoto();
+  };
 
+  const continueFromPhotos = () => {
+    setFormError(null);
+    setStep(3);
+    if (name.trim()) void showMarketQuote();
+  };
+
+  const continueFromDetails = () => {
+    const parsedQuantity = Number(quantity);
+    const parsedPrice = pricePerUnit.trim() ? Number(pricePerUnit) : null;
+    if (!quantity.trim() || !Number.isFinite(parsedQuantity) || parsedQuantity <= 0) { setFormError('quantityInvalid'); return; }
+    if (parsedPrice !== null && (!Number.isFinite(parsedPrice) || parsedPrice <= 0)) { setFormError('priceInvalid'); return; }
+    setFormError(null);
+    setStep(4);
+  };
+
+  const unitLabel = t(`produce.unit.${unit}` as Parameters<typeof t>[0]);
+  const askingPrice = pricePerUnit.trim() ? `₹${pricePerUnit} / ${t(`produce.priceUnit.${unit}` as Parameters<typeof t>[0])}` : t('produce.priceNotAdded');
+  const simpleMarketQuote = marketQuote?.items[0];
+  const simpleQuoteDate = simpleMarketQuote?.sourceDate ? new Intl.DateTimeFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { dateStyle: 'medium' }).format(new Date(`${simpleMarketQuote.sourceDate}T00:00:00`)) : null;
+  const simpleQuoteText = simpleMarketQuote?.unitCompatible && simpleMarketQuote.modalPrice !== null && simpleMarketQuote.priceUnit
+    ? `${t('farmer.prices.simpleMandiPrice').replace('{price}', new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(simpleMarketQuote.modalPrice)).replace('{unit}', t(`produce.priceUnit.${simpleMarketQuote.priceUnit.split('/')[1] ?? 'kg'}` as Parameters<typeof t>[0]))}${simpleQuoteDate ? ` · ${simpleQuoteDate}` : ''}${simpleMarketQuote.fallbackLevel === 'other_karnataka' ? ` · ${t('farmer.prices.regionalReference')}` : ''}`
+    : null;
+
+  return <FarmerDashboardGuard><ScreenFrame>
+    <BrandHeader role="Farmer" />
+    <Pressable accessibilityRole="button" onPress={() => step === 1 ? router.replace('/farmer') : setStep((step - 1) as 1 | 2 | 3 | 4)} style={styles.backButton}>
+      <Text style={styles.backText}>‹ {t('navigation.back')}</Text>
+    </Pressable>
+    <View style={styles.card}>
+      <Text style={styles.eyebrow}>{t('produce.stepProgress').replace('{step}', String(step))}</Text>
+      <Text style={styles.title}>{step === 1 ? t('produce.name') : step === 2 ? t('produce.photos') : step === 3 ? t('produce.detailsTitle') : t('produce.reviewTitle')}</Text>
+      {step === 1 ? <>
         <View style={styles.field}>
           <Text style={styles.label}>{t('produce.name')} *</Text>
           <View style={styles.nameRow}>
-          <TextInput editable={!saving} value={name} onChangeText={(value) => { setName(value); resetMarketQuote(); setFormError(null); submissionId.current = createSubmissionId(); }} onEndEditing={() => { if (name.trim()) void showMarketQuote(); }} placeholder={t('produce.namePlaceholder')} placeholderTextColor={MarketColors.muted} maxLength={120} accessibilityLabel={t('produce.name')} style={[styles.input, styles.nameInput]} />
-            <Pressable accessibilityRole="button" accessibilityLabel={t(recognizing ? 'produce.stopSpeech' : 'produce.startSpeech')} accessibilityState={{ disabled: saving }} disabled={saving} onPress={() => void toggleSpeech()} style={[styles.voiceButton, recognizing && styles.voiceActive]}>
-              <Text style={styles.voiceText}>{recognizing ? '■' : '🎙'}</Text>
-            </Pressable>
+            <TextInput autoFocus editable={!saving} value={name} onChangeText={(value) => { setName(value); resetMarketQuote(); setFormError(null); submissionId.current = createSubmissionId(); }} placeholder={t('produce.namePlaceholder')} placeholderTextColor={MarketColors.muted} maxLength={120} accessibilityLabel={t('produce.name')} style={[styles.input, styles.nameInput, styles.largeInput]} />
+            <Pressable accessibilityRole="button" accessibilityLabel={t(recognizing ? 'produce.stopSpeech' : 'produce.startSpeech')} disabled={saving} onPress={() => void toggleSpeech()} style={[styles.voiceButton, recognizing && styles.voiceActive]}><Text style={styles.voiceText}>{recognizing ? '■' : '🎙'}</Text></Pressable>
           </View>
-          {speechMessage ? <Text accessibilityRole="alert" style={speechMessage === 'produce.speechRecognized' ? styles.successText : styles.help}>{t(speechMessage as Parameters<typeof t>[0])}</Text> : <Text style={styles.help}>{t('produce.speechHint')}</Text>}
+          {speechMessage ? <Text accessibilityRole="alert" style={speechMessage === 'produce.speechRecognized' ? styles.successText : styles.help}>{t(speechMessage as Parameters<typeof t>[0])}</Text> : null}
+          {translatedFormError ? <Text accessibilityRole="alert" style={styles.error}>{translatedFormError}</Text> : null}
         </View>
-
-        <View style={styles.field}>
-          <Text style={styles.label}>{t('produce.quantity')} *</Text>
-          <View style={styles.quantityRow}>
-            <TextInput editable={!saving} value={quantity} onChangeText={(value) => { setQuantity(value.replace(/[^\d.]/g, '')); setFormError(null); submissionId.current = createSubmissionId(); }} keyboardType="decimal-pad" inputMode="decimal" accessibilityLabel={t('produce.quantity')} placeholder={t('produce.quantityPlaceholder')} placeholderTextColor={MarketColors.muted} style={[styles.input, styles.quantityInput]} />
-            <View style={styles.units}>
-              {(['kg', 'quintal', 'bunch', 'pieces'] as const).map((value) => <Pressable key={value} accessibilityRole="button" disabled={saving} accessibilityState={{ selected: unit === value, disabled: saving }} onPress={() => { setUnit(value); resetMarketQuote(); submissionId.current = createSubmissionId(); }} style={[styles.unit, unit === value && styles.unitSelected]}><Text style={[styles.unitText, unit === value && styles.unitTextSelected]}>{t(`produce.unit.${value}` as Parameters<typeof t>[0])}</Text></Pressable>)}
-            </View>
-          </View>
-        </View>
-
-        <View style={styles.marketQuoteBox}>
-          <Text style={styles.label}>{t('farmer.prices.beforePriceTitle')}</Text>
-          <Text style={styles.help}>{t('farmer.prices.beforePriceHelp')}</Text>
-          <Pressable accessibilityRole="button" accessibilityState={{ disabled: marketQuoteLoading || saving || !name.trim() }} disabled={marketQuoteLoading || saving || !name.trim()} onPress={() => void showMarketQuote()} style={[styles.quoteButton, (marketQuoteLoading || saving || !name.trim()) && styles.disabled]}>
-            {marketQuoteLoading ? <ActivityIndicator color={MarketColors.green} /> : <Text style={styles.quoteButtonText}>{marketQuote || marketQuoteError ? t('farmer.prices.retry') : t('farmer.prices.quoteButton')}</Text>}
-          </Pressable>
-          {marketQuoteError ? <Text accessibilityRole="alert" style={styles.error}>{t(marketQuoteError as Parameters<typeof t>[0])}</Text> : null}
-          {marketQuoteLoading ? <Text style={styles.help}>{t('farmer.prices.quoteLoading')}</Text> : null}
-          {marketQuote ? <FarmerMarketResults comparison={marketQuote} t={t} language={language} /> : null}
-        </View>
-
-        <View style={styles.field}>
-          <Text style={styles.label}>{t('produce.sellingPrice')}</Text>
-          <View style={styles.priceRow}>
-            <Text style={styles.currencyPrefix}>₹</Text>
-            <TextInput editable={!saving} value={pricePerUnit} onChangeText={(value) => { setPricePerUnit(value.replace(/[^\d.]/g, '')); setFormError(null); submissionId.current = createSubmissionId(); }} keyboardType="decimal-pad" inputMode="decimal" accessibilityLabel={`${t('produce.sellingPrice')} ${t(`produce.priceUnit.${unit}` as Parameters<typeof t>[0])}`} placeholder={t('produce.pricePlaceholder')} placeholderTextColor={MarketColors.muted} style={[styles.input, styles.priceInput]} />
-            <Text style={styles.priceUnit}>/ {t(`produce.priceUnit.${unit}` as Parameters<typeof t>[0])}</Text>
-          </View>
-          <Text style={styles.help}>{t('produce.askingPriceNote')}</Text>
-          {Number.isFinite(Number(quantity)) && Number(quantity) > 0 && Number.isFinite(Number(pricePerUnit)) && Number(pricePerUnit) > 0 ? <Text style={styles.estimate}>{t('produce.estimatedTotalValue').replace('{amount}', new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(Number(quantity) * Number(pricePerUnit)))}</Text> : null}
-        </View>
-
-        <View style={styles.photoHead}>
-          <View><Text style={styles.label}>{t('produce.photos')} *</Text><Text style={styles.help}>{t('produce.photoRequirement')}</Text></View>
-          <Text style={styles.photoCount}>{photos.length}/5</Text>
-        </View>
-        <Pressable accessibilityRole="button" accessibilityLabel={t('produce.capturePhoto')} accessibilityState={{ disabled: photos.length >= 5 || capturing || saving }} disabled={photos.length >= 5 || capturing || saving} onPress={() => void capturePhoto()} style={[styles.captureButton, (photos.length >= 5 || capturing) && styles.disabled]}>
-          {capturing ? <ActivityIndicator color={MarketColors.green} /> : <Text style={styles.captureText}>＋ {t('produce.capturePhoto')}</Text>}
-        </Pressable>
-        <Text style={styles.help}>{t('produce.cameraOnlyNote')}</Text>
+        <Pressable accessibilityRole="button" onPress={continueFromName} style={styles.saveButton}><Text style={styles.saveText}>{t('produce.next')}</Text></Pressable>
+      </> : null}
+      {step === 2 ? <>
+        <Text style={styles.help}>{t('produce.photosOptional')}</Text>
+        <View style={styles.photoHead}><Text style={styles.label}>{photos.length}/5</Text>{photos.length < 5 ? <Pressable accessibilityRole="button" disabled={capturing || saving} onPress={() => void capturePhoto()} style={styles.captureButton}>{capturing ? <ActivityIndicator color={MarketColors.green} /> : <Text style={styles.captureText}>＋ {photos.length ? t('produce.addAnotherPhoto') : t('produce.capturePhoto')}</Text>}</Pressable> : null}</View>
         <Text accessibilityRole="summary" style={produceLocation?.status === 'captured' ? styles.successText : styles.help}>{t(locationMessage as Parameters<typeof t>[0])}</Text>
-        {produceLocation?.status === 'unavailable' ? <Text style={styles.help}>{t('produce.locationOptional')}</Text> : null}
+        {produceLocation?.status !== 'captured' ? <Text style={styles.help}>{t('produce.locationOptional')}</Text> : null}
         {cameraMessage ? <Text accessibilityRole="alert" style={styles.error}>{t(cameraMessage as Parameters<typeof t>[0])}</Text> : null}
         {photos.length ? <View style={styles.photoGrid}>{photos.map((photo, index) => <View key={`${photo.uri}-${index}`} style={styles.photoCard}>
           <Image source={{ uri: photo.uri }} contentFit="cover" style={styles.photo} accessibilityLabel={`${t('produce.photoPreview')} ${index + 1}`} />
           <Pressable accessibilityRole="button" disabled={saving} accessibilityLabel={`${t('produce.removePhoto')} ${index + 1}`} onPress={() => { submissionId.current = createSubmissionId(); setPhotos((current) => current.filter((_, photoIndex) => photoIndex !== index)); }} style={styles.removePhoto}><Text style={styles.removePhotoText}>×</Text></Pressable>
           <Pressable accessibilityRole="button" disabled={saving || capturing} onPress={() => void capturePhoto(index)} style={styles.retake}><Text style={styles.retakeText}>{t('produce.retakePhoto')}</Text></Pressable>
         </View>)}</View> : null}
-
+        <View style={styles.buttonRow}><Pressable accessibilityRole="button" onPress={continueFromPhotos} style={styles.saveButton}><Text style={styles.saveText}>{t('produce.continue')}</Text></Pressable><Pressable accessibilityRole="button" onPress={continueFromPhotos} style={styles.skipButton}><Text style={styles.skipText}>{t('produce.skipPhotos')}</Text></Pressable></View>
+      </> : null}
+      {step === 3 ? <>
+        <View style={styles.field}><Text style={styles.label}>{t('produce.quantity')} *</Text><TextInput editable={!saving} value={quantity} onChangeText={(value) => { setQuantity(value.replace(/[^\d.]/g, '')); setFormError(null); submissionId.current = createSubmissionId(); }} keyboardType="decimal-pad" inputMode="decimal" accessibilityLabel={t('produce.quantity')} placeholder={t('produce.quantityPlaceholder')} placeholderTextColor={MarketColors.muted} style={[styles.input, styles.largeInput]} /><View style={styles.units}>{(['kg', 'quintal', 'bunch', 'pieces'] as const).map((value) => <Pressable key={value} accessibilityRole="button" disabled={saving} accessibilityState={{ selected: unit === value }} onPress={() => { setUnit(value); resetMarketQuote(); submissionId.current = createSubmissionId(); }} style={[styles.unit, unit === value && styles.unitSelected]}><Text style={[styles.unitText, unit === value && styles.unitTextSelected]}>{t(`produce.unit.${value}` as Parameters<typeof t>[0])}</Text></Pressable>)}</View></View>
+        <View style={styles.field}><Text style={styles.label}>{t('produce.sellingPrice')}</Text><View style={styles.priceRow}><Text style={styles.currencyPrefix}>₹</Text><TextInput editable={!saving} value={pricePerUnit} onChangeText={(value) => { setPricePerUnit(value.replace(/[^\d.]/g, '')); setFormError(null); submissionId.current = createSubmissionId(); }} keyboardType="decimal-pad" inputMode="decimal" accessibilityLabel={`${t('produce.sellingPrice')} ${t(`produce.priceUnit.${unit}` as Parameters<typeof t>[0])}`} placeholder={t('produce.pricePlaceholder')} placeholderTextColor={MarketColors.muted} style={[styles.input, styles.priceInput, styles.largeInput]} /><Text style={styles.priceUnit}>/ {t(`produce.priceUnit.${unit}` as Parameters<typeof t>[0])}</Text></View>
+          {Number(quantity) > 0 && Number(pricePerUnit) > 0 ? <Text style={styles.estimate}>{t('produce.estimatedTotalValue').replace('{amount}', new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(Number(quantity) * Number(pricePerUnit)))}</Text> : null}</View>
+        <View style={styles.marketQuoteBox}><Text style={styles.label}>{t('farmer.prices.shortReference')}</Text>{marketQuoteLoading ? <ActivityIndicator color={MarketColors.green} /> : simpleQuoteText ? <Text style={styles.quoteButtonText}>{simpleQuoteText}</Text> : <Text style={styles.help}>{t('farmer.prices.noReference')}</Text>}{marketQuoteError ? <Pressable accessibilityRole="button" onPress={() => void showMarketQuote()}><Text style={styles.quoteButtonText}>{t('farmer.prices.retry')}</Text></Pressable> : null}</View>
+        {translatedFormError ? <Text accessibilityRole="alert" style={styles.error}>{translatedFormError}</Text> : null}
+        <Pressable accessibilityRole="button" onPress={continueFromDetails} style={styles.saveButton}><Text style={styles.saveText}>{t('produce.next')}</Text></Pressable>
+      </> : null}
+      {step === 4 ? <>
+        <Text style={styles.reviewName}>{name.trim()}</Text>
+        {photos.length ? <View style={styles.photoGrid}>{photos.map((photo, index) => <Image key={`${photo.uri}-${index}`} source={{ uri: photo.uri }} contentFit="cover" style={styles.reviewPhoto} accessibilityLabel={`${t('produce.photoPreview')} ${index + 1}`} />)}</View> : null}
+        <Text style={styles.reviewLine}>{t('produce.availableQuantity').replace('{quantity}', quantity).replace('{unit}', unitLabel)}</Text>
+        <Text style={styles.reviewLine}>{askingPrice}</Text>
+        {produceLocation?.status === 'captured' ? <Text style={styles.help}>{t('produce.locationCaptured')}</Text> : <Text style={styles.help}>{t('produce.locationUnavailable')}</Text>}
         {translatedFormError ? <Text accessibilityRole="alert" style={styles.error}>{translatedFormError}</Text> : null}
         {submitError ? <Text accessibilityRole="alert" style={styles.error}>{t(submitError as Parameters<typeof t>[0])}</Text> : null}
-        <Pressable accessibilityRole="button" accessibilityState={{ disabled: saving }} disabled={saving} onPress={() => void submit()} style={[styles.saveButton, saving && styles.disabled]}>
-          {saving ? <ActivityIndicator color="#FFFFFF" /> : <Text style={styles.saveText}>{t('produce.save')}</Text>}
-        </Pressable>
-      </View>
-      <View style={styles.listingNote}>
-        <SectionHeading title={t('produce.priceLaterTitle')} />
-        <Text style={styles.help}>{t('produce.priceLaterNote')}</Text>
-      </View>
-    </ScreenFrame>
-  </FarmerDashboardGuard>;
+        <Pressable accessibilityRole="button" accessibilityState={{ disabled: saving }} disabled={saving} onPress={() => void submit()} style={[styles.saveButton, saving && styles.disabled]}>{saving ? <ActivityIndicator color="#FFFFFF" /> : <Text style={styles.saveText}>{t('produce.save')}</Text>}</Pressable>
+      </> : null}
+    </View>
+  </ScreenFrame></FarmerDashboardGuard>;
 }
 
 const styles = StyleSheet.create({
@@ -303,4 +318,5 @@ const styles = StyleSheet.create({
   help: { color: MarketColors.muted, fontSize: 12, lineHeight: 17 }, successText: { color: MarketColors.greenDark, fontSize: 12, fontWeight: '700' }, quantityRow: { gap: 9 }, quantityInput: { width: '100%' }, units: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 }, unit: { minHeight: 38, borderRadius: 10, borderWidth: 1, borderColor: MarketColors.border, paddingHorizontal: 12, justifyContent: 'center' }, unitSelected: { borderColor: MarketColors.green, backgroundColor: MarketColors.greenSoft }, unitText: { color: MarketColors.text, fontSize: 12, fontWeight: '600' }, unitTextSelected: { color: MarketColors.greenDark, fontWeight: '800' }, priceRow: { flexDirection: 'row', alignItems: 'center', gap: 8 }, currencyPrefix: { color: MarketColors.text, fontSize: 17, fontWeight: '800' }, priceInput: { flex: 1 }, priceUnit: { color: MarketColors.greenDark, fontWeight: '800', fontSize: 13 }, estimate: { color: MarketColors.greenDark, fontSize: 13, fontWeight: '700' },
   marketQuoteBox: { gap: 9, backgroundColor: MarketColors.background, borderRadius: 14, padding: 12 }, quoteButton: { minHeight: 44, borderRadius: 11, borderWidth: 1.3, borderColor: MarketColors.green, alignItems: 'center', justifyContent: 'center' }, quoteButtonText: { color: MarketColors.greenDark, fontWeight: '800' },
   photoHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, photoCount: { color: MarketColors.greenDark, fontWeight: '800' }, captureButton: { minHeight: 48, borderWidth: 1.4, borderColor: MarketColors.green, borderRadius: 12, alignItems: 'center', justifyContent: 'center' }, captureText: { color: MarketColors.green, fontWeight: '800' }, photoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, photoCard: { width: '31%', minWidth: 90, maxWidth: 150, height: 134, borderRadius: 12, backgroundColor: MarketColors.background, overflow: 'hidden' }, photo: { width: '100%', height: 96 }, removePhoto: { position: 'absolute', right: 5, top: 5, width: 27, height: 27, borderRadius: 14, backgroundColor: '#FFFFFF', alignItems: 'center', justifyContent: 'center' }, removePhotoText: { color: '#B42318', fontSize: 21, lineHeight: 24, fontWeight: '800' }, retake: { flex: 1, alignItems: 'center', justifyContent: 'center' }, retakeText: { color: MarketColors.greenDark, fontSize: 11, fontWeight: '700' }, error: { color: '#B42318', fontSize: 13, lineHeight: 18 }, saveButton: { minHeight: 50, borderRadius: 13, backgroundColor: MarketColors.green, alignItems: 'center', justifyContent: 'center', marginTop: 3 }, saveText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' }, disabled: { opacity: 0.55 }, listingNote: { marginTop: 20, padding: 14, backgroundColor: MarketColors.greenSoft, borderRadius: 14 },
+  largeInput: { minHeight: 58, fontSize: 17 }, buttonRow: { gap: 8 }, skipButton: { minHeight: 46, borderRadius: 12, borderWidth: 1, borderColor: MarketColors.border, alignItems: 'center', justifyContent: 'center' }, skipText: { color: MarketColors.greenDark, fontWeight: '800' }, reviewName: { color: MarketColors.text, fontSize: 20, fontWeight: '800' }, reviewLine: { color: MarketColors.text, fontSize: 16, fontWeight: '600' }, reviewPhoto: { width: 86, height: 86, borderRadius: 10, backgroundColor: MarketColors.background },
 });

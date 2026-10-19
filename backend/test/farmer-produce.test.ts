@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import test, { type TestContext } from 'node:test';
+import mongoose from 'mongoose';
 import { Writable } from 'node:stream';
 import sharp from 'sharp';
 
@@ -20,6 +21,7 @@ const token = 'fictional-produce-session-token-123456789012345678';
 const farmer = { _id: farmerId, accountStatus: 'active', phoneVerificationStatus: 'verified', documentComparisonStatus: 'passed' };
 let uploadCount = 0;
 let failUploadNumber: number | null = null;
+let failDelete = false;
 const uploadedPublicIds: string[] = [];
 const deletedPublicIds: string[] = [];
 const uploadRequests: Array<Record<string, unknown>> = [];
@@ -50,6 +52,7 @@ const mockCloudinary = {
     },
     destroy: async (publicId: string, options: Record<string, unknown>) => {
       assert.equal(options.type, 'authenticated');
+      if (failDelete) throw new Error('synthetic Cloudinary deletion failure');
       deletedPublicIds.push(publicId);
       return { result: 'ok' };
     },
@@ -66,6 +69,7 @@ produceStorage.setProduceCloudinaryClientForTests(mockCloudinary);
 function resetCloudinaryState() {
   uploadCount = 0;
   failUploadNumber = null;
+  failDelete = false;
   uploadedPublicIds.length = 0;
   deletedPublicIds.length = 0;
   uploadRequests.length = 0;
@@ -81,6 +85,13 @@ function mockAuthentication(context: TestContext) {
     assert.equal(String(id), farmerId);
     return farmer as never;
   });
+}
+
+function mockNoPendingProduceRequests(context: TestContext) {
+  context.mock.method(mongoose, 'startSession', async () => ({ withTransaction: async (callback: () => Promise<void>) => callback(), endSession: async () => undefined }) as never);
+  context.mock.method(models.ProduceRequestModel, 'find', () => ({ select() { return this; }, session() { return this; }, lean() { return this; }, exec: async () => [] }) as never);
+  context.mock.method(models.ProduceRequestModel, 'updateMany', async () => ({ modifiedCount: 0 }) as never);
+  context.mock.method(models.ProduceModel, 'deleteOne', () => ({ session() { return this; }, exec: async () => ({ deletedCount: 1 }) }) as never);
 }
 
 async function withServer(context: TestContext) {
@@ -118,7 +129,7 @@ function makeForm(image: Buffer | null, options: { name?: string; sourceLanguage
   return form;
 }
 
-test('authenticated create stores a priced unpublished listing owned by the session Farmer', async (context) => {
+test('authenticated create immediately publishes a complete priced listing owned by the session Farmer', async (context) => {
   resetCloudinaryState();
   mockAuthentication(context);
   const image = await fictionalImage();
@@ -133,7 +144,7 @@ test('authenticated create stores a priced unpublished listing owned by the sess
     assert.equal(document.quantity, 12.5);
     assert.equal(document.unit, 'kg');
     assert.equal(document.pricePerUnit, 45.75);
-    assert.equal(document.status, 'priced_unpublished');
+    assert.equal(document.status, 'published');
     assert.deepEqual(document.location, { status: 'captured', latitude: 12.9141, longitude: 74.856, accuracyMeters: 18.5, capturedAt: new Date('2026-10-19T04:45:00.000Z') });
     const produceId = String(document._id);
     expectedProduceId = produceId;
@@ -149,7 +160,7 @@ test('authenticated create stores a priced unpublished listing owned by the sess
   const response = await post('/api/farmer/produce', makeForm(image, { sourceLanguage: 'kn', nameTranslations: JSON.stringify({ en: 'Fictional Kale', kn: 'ಕಾಲ್ಪನಿಕ ಕೇಲ್', tcy: 'ಕಾಲ್ಪನಿಕ ಕೇಲ್' }), location: JSON.stringify({ status: 'captured', latitude: 12.9141, longitude: 74.856, accuracyMeters: 18.5, capturedAt: '2026-10-19T04:45:00.000Z' }) }));
   assert.equal(response.status, 201);
   const body = await response.json() as { item: { status: string; pricePerUnit: number; quantity: number; unit: string; photos: Array<{ url: string }> } };
-  assert.equal(body.item.status, 'priced_unpublished');
+  assert.equal(body.item.status, 'published');
   assert.equal(body.item.pricePerUnit, 45.75);
   assert.equal(body.item.quantity, 12.5);
   assert.equal(body.item.unit, 'kg');
@@ -224,16 +235,24 @@ test('a different authenticated Farmer receives no listing or coordinates from a
   assert.deepEqual(await response.json(), { items: [] });
 });
 
-test('produce creation rejects invalid quantity, missing photos, and more than five photos', async (context) => {
+test('produce creation accepts zero, one, and five photos and rejects more than five', async (context) => {
   resetCloudinaryState();
   mockAuthentication(context);
   const post = await withServer(context);
   const image = await fictionalImage();
+  context.mock.method(models.ProduceModel, 'findOne', () => ({ lean: () => ({ exec: async () => null }) }) as never);
+  context.mock.method(models.ProduceModel, 'create', async (documents: Array<Record<string, unknown>>) => {
+    const now = new Date();
+    return [{ ...documents[0], _id: 'fictional-produced-id', createdAt: now, updatedAt: now }] as never;
+  });
   const invalidQuantity = await post('/api/farmer/produce', makeForm(image, { quantity: '0' }));
   assert.equal(invalidQuantity.status, 400);
-  const missingPhotos = await post('/api/farmer/produce', makeForm(null));
-  assert.equal(missingPhotos.status, 400);
-  assert.deepEqual(await missingPhotos.json(), { error: 'produce_photo_count_invalid' });
+  for (const count of [0, 1, 5]) {
+    const response = await post('/api/farmer/produce', makeForm(image, { count }));
+    assert.equal(response.status, 201, `${count} photos should be accepted`);
+    const body = await response.json() as { item: { photos: unknown[] } };
+    assert.equal(body.item.photos.length, count);
+  }
   const tooMany = await post('/api/farmer/produce', makeForm(image, { count: 6 }));
   assert.equal(tooMany.status, 400);
 });
@@ -272,7 +291,7 @@ test('owner can add a price to an existing awaiting-price draft without replacin
   const originalPhoto = { storageKey: 'existing-photo-key.png', mimeType: 'image/png', size: 1234 };
   const updated = {
     _id: produceId, name: 'Fictional Kale', nameTranslations: { kn: 'ಕಾಲ್ಪನಿಕ ಸೊಪ್ಪು' }, quantity: 12.5, unit: 'quintal', pricePerUnit: 88.25,
-    status: 'priced_unpublished', photos: [originalPhoto, { ...originalPhoto, storageKey: 'photo-two.png' }],
+    status: 'published', photos: [originalPhoto, { ...originalPhoto, storageKey: 'photo-two.png' }],
     createdAt, updatedAt: new Date(),
   };
   context.mock.method(models.ProduceModel, 'findOneAndUpdate', (filter: unknown, update: unknown, options: unknown) => {
@@ -281,7 +300,7 @@ test('owner can add a price to an existing awaiting-price draft without replacin
     assert.equal(query.farmerId, farmerId);
     assert.equal(query.status, 'awaiting_price');
     assert.equal(query.pricePerUnit, null);
-    assert.deepEqual(update, { $set: { pricePerUnit: 88.25, priceUnit: 'quintal', status: 'priced_unpublished' } });
+    assert.deepEqual(update, { $set: { pricePerUnit: 88.25, priceUnit: 'quintal', status: 'published' } });
     assert.deepEqual(options, { new: true, runValidators: true });
     return { lean: () => ({ exec: async () => updated }) } as never;
   });
@@ -293,7 +312,7 @@ test('owner can add a price to an existing awaiting-price draft without replacin
   assert.equal(body.item.pricePerUnit, 88.25);
   assert.equal(body.item.quantity, 12.5);
   assert.equal(body.item.unit, 'quintal');
-  assert.equal(body.item.status, 'priced_unpublished');
+  assert.equal(body.item.status, 'published');
   assert.deepEqual(body.item.nameTranslations, { kn: 'ಕಾಲ್ಪನಿಕ ಸೊಪ್ಪು' });
   assert.deepEqual(body.item.photos.map(({ url }) => url), [
     `/api/farmer/produce/${produceId}/photos/0`,
@@ -411,6 +430,71 @@ test('authorized photo delivery uses an expiring signed authenticated Cloudinary
   const mockedCloudinaryAcceptsSignedUrl = (at: number) => Number(new URL(signedUrl).searchParams.get('expires_at')) >= at;
   assert.equal(mockedCloudinaryAcceptsSignedUrl(now), true);
   assert.equal(mockedCloudinaryAcceptsSignedUrl(expiry + 1), false, 'expired signed URLs must stop authorizing delivery');
+});
+
+function mockDeleteCandidate(context: TestContext, photoId = `karavali-fresh/farmers/${farmerId}/produce/delete-test/photo`) {
+  const produceId = '64b000000000000000000010';
+  let exists = true;
+  context.mock.method(models.ProduceModel, 'findOne', (query: unknown) => {
+    assert.equal(String((query as { _id: unknown })._id), produceId);
+    assert.equal(String((query as { farmerId: unknown }).farmerId), farmerId);
+    return { select: () => ({ lean: () => ({ exec: async () => exists ? { photos: [{ publicId: photoId, resourceType: 'image' }] } : null }) }) } as never;
+  });
+  const deleteOne = context.mock.method(models.ProduceModel, 'deleteOne', (query: unknown) => {
+    assert.equal(String((query as { _id: unknown })._id), produceId);
+    assert.equal(String((query as { farmerId: unknown }).farmerId), farmerId);
+    return { session() { return this; }, exec: async () => { exists = false; return { deletedCount: 1 }; } } as never;
+  });
+  return { produceId, deleteOne };
+}
+
+test('Farmer can permanently delete an owned listing and its Cloudinary photos', async (context) => {
+  resetCloudinaryState();
+  mockAuthentication(context);
+  mockNoPendingProduceRequests(context);
+  const { produceId, deleteOne } = mockDeleteCandidate(context);
+  const request = await withServer(context);
+  const response = await request(`/api/farmer/produce/${produceId}`, undefined, 'DELETE');
+  assert.equal(response.status, 204);
+  assert.equal(deleteOne.mock.calls.length, 1);
+  assert.deepEqual(deletedPublicIds, [`karavali-fresh/farmers/${farmerId}/produce/delete-test/photo`]);
+});
+
+test('listing deletion is owner-scoped and returns not found for missing or repeated requests', async (context) => {
+  resetCloudinaryState();
+  mockAuthentication(context);
+  mockNoPendingProduceRequests(context);
+  const produceId = '64b000000000000000000011';
+  context.mock.method(models.ProduceModel, 'findOne', (query: unknown) => {
+    assert.equal(String((query as { farmerId: unknown }).farmerId), farmerId);
+    return { select: () => ({ lean: () => ({ exec: async () => null }) }) } as never;
+  });
+  const request = await withServer(context);
+  const invalid = await request('/api/farmer/produce/not-an-object-id', undefined, 'DELETE');
+  assert.equal(invalid.status, 404);
+  const missing = await request(`/api/farmer/produce/${produceId}`, undefined, 'DELETE');
+  assert.equal(missing.status, 404);
+  const repeated = await request(`/api/farmer/produce/${produceId}`, undefined, 'DELETE');
+  assert.equal(repeated.status, 404);
+  assert.deepEqual(deletedPublicIds, []);
+});
+
+test('Cloudinary cleanup failure keeps the listing and allows a safe retry', async (context) => {
+  resetCloudinaryState();
+  mockAuthentication(context);
+  mockNoPendingProduceRequests(context);
+  const { produceId, deleteOne } = mockDeleteCandidate(context);
+  failDelete = true;
+  const request = await withServer(context);
+  const failed = await request(`/api/farmer/produce/${produceId}`, undefined, 'DELETE');
+  assert.equal(failed.status, 503);
+  assert.deepEqual(await failed.json(), { error: 'produce_image_cleanup_failed' });
+  assert.equal(deleteOne.mock.calls.length, 0);
+
+  failDelete = false;
+  const retried = await request(`/api/farmer/produce/${produceId}`, undefined, 'DELETE');
+  assert.equal(retried.status, 204);
+  assert.equal(deleteOne.mock.calls.length, 1);
 });
 
 test('a different Farmer cannot obtain a signed URL for a saved photo', async (context) => {
