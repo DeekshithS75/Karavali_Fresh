@@ -34,6 +34,12 @@
     "plugins": [
       "expo-router",
       [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow Karavali Fresh to capture this produce location once, so buyers can find nearby produce. Location is optional and is not tracked in the background."
+        }
+      ],
+      [
         "expo-splash-screen",
         {
           "backgroundColor": "#208AEF",

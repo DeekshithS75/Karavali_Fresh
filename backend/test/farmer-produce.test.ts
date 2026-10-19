@@ -102,7 +102,7 @@ async function fictionalImage() {
   return sharp(Buffer.from(svg)).png().toBuffer();
 }
 
-function makeForm(image: Buffer | null, options: { name?: string; sourceLanguage?: string; nameTranslations?: string; quantity?: string; unit?: string; pricePerUnit?: string; omitPrice?: boolean; count?: number; imageMime?: string } = {}) {
+function makeForm(image: Buffer | null, options: { name?: string; sourceLanguage?: string; nameTranslations?: string; quantity?: string; unit?: string; pricePerUnit?: string; omitPrice?: boolean; count?: number; imageMime?: string; location?: string } = {}) {
   const form = new FormData();
   form.append('name', options.name ?? 'Fictional Kale');
   form.append('sourceLanguage', options.sourceLanguage ?? 'en');
@@ -110,6 +110,7 @@ function makeForm(image: Buffer | null, options: { name?: string; sourceLanguage
   form.append('quantity', options.quantity ?? '12.5');
   form.append('unit', options.unit ?? 'kg');
   if (!options.omitPrice) form.append('pricePerUnit', options.pricePerUnit ?? '45.75');
+  if (options.location !== undefined) form.append('location', options.location);
   form.append('farmerId', otherFarmerId);
   for (let index = 0; image && index < (options.count ?? 2); index++) {
     form.append('photos', new Blob([new Uint8Array(image)], { type: options.imageMime ?? 'image/png' }), `produce-${index}.png`);
@@ -133,6 +134,7 @@ test('authenticated create stores a priced unpublished listing owned by the sess
     assert.equal(document.unit, 'kg');
     assert.equal(document.pricePerUnit, 45.75);
     assert.equal(document.status, 'priced_unpublished');
+    assert.deepEqual(document.location, { status: 'captured', latitude: 12.9141, longitude: 74.856, accuracyMeters: 18.5, capturedAt: new Date('2026-10-19T04:45:00.000Z') });
     const produceId = String(document._id);
     expectedProduceId = produceId;
     const photos = document.photos as Array<Record<string, unknown>>;
@@ -144,7 +146,7 @@ test('authenticated create stores a priced unpublished listing owned by the sess
     return [{ ...document, _id: 'fictional-produce-id', createdAt: now, updatedAt: now }] as never;
   });
   const post = await withServer(context);
-  const response = await post('/api/farmer/produce', makeForm(image, { sourceLanguage: 'kn', nameTranslations: JSON.stringify({ en: 'Fictional Kale', kn: 'ಕಾಲ್ಪನಿಕ ಕೇಲ್', tcy: 'ಕಾಲ್ಪನಿಕ ಕೇಲ್' }) }));
+  const response = await post('/api/farmer/produce', makeForm(image, { sourceLanguage: 'kn', nameTranslations: JSON.stringify({ en: 'Fictional Kale', kn: 'ಕಾಲ್ಪನಿಕ ಕೇಲ್', tcy: 'ಕಾಲ್ಪನಿಕ ಕೇಲ್' }), location: JSON.stringify({ status: 'captured', latitude: 12.9141, longitude: 74.856, accuracyMeters: 18.5, capturedAt: '2026-10-19T04:45:00.000Z' }) }));
   assert.equal(response.status, 201);
   const body = await response.json() as { item: { status: string; pricePerUnit: number; quantity: number; unit: string; photos: Array<{ url: string }> } };
   assert.equal(body.item.status, 'priced_unpublished');
@@ -156,8 +158,38 @@ test('authenticated create stores a priced unpublished listing owned by the sess
   assert.equal(uploadCount, 2);
   assert.ok(uploadRequests.every((options) => options.resource_type === 'image' && options.type === 'authenticated' && options.overwrite === false));
   assert.ok(uploadRequests.every((options) => options.folder === `karavali-fresh/farmers/${farmerId}/produce/${expectedProduceId}`));
+  assert.ok(uploadRequests.every((options) => !('latitude' in options) && !('longitude' in options) && !('location' in options)));
   assert.equal(deletedPublicIds.length, 0);
   assert.deepEqual(cloudinaryConfig, { cloud_name: 'synthetic-cloud', api_key: 'synthetic-api-key', api_secret: 'synthetic-api-secret-do-not-return', secure: true });
+});
+
+test('produce location accepts an explicit unavailable state and rejects invalid coordinates, accuracy, and timestamps', async (context) => {
+  resetCloudinaryState();
+  mockAuthentication(context);
+  const post = await withServer(context);
+  const image = await fictionalImage();
+  for (const location of [
+    JSON.stringify({ status: 'captured', latitude: 91, longitude: 20, accuracyMeters: 10, capturedAt: '2026-10-19T04:45:00.000Z' }),
+    JSON.stringify({ status: 'captured', latitude: 12, longitude: 181, accuracyMeters: 10, capturedAt: '2026-10-19T04:45:00.000Z' }),
+    JSON.stringify({ status: 'captured', latitude: 12, longitude: 20, accuracyMeters: 'nearby', capturedAt: '2026-10-19T04:45:00.000Z' }),
+    JSON.stringify({ status: 'captured', latitude: 12, longitude: 20, accuracyMeters: -1, capturedAt: '2026-10-19T04:45:00.000Z' }),
+    JSON.stringify({ status: 'captured', latitude: 12, longitude: 20, accuracyMeters: 10, capturedAt: 'not-a-date' }),
+    JSON.stringify({ status: 'captured', latitude: 12, longitude: 20, accuracyMeters: 100_001, capturedAt: '2026-10-19T04:45:00.000Z' }),
+  ]) {
+    const response = await post('/api/farmer/produce', makeForm(image, { location }));
+    assert.equal(response.status, 400);
+  }
+  context.mock.method(models.ProduceModel, 'findOne', () => ({ lean: () => ({ exec: async () => null }) }) as never);
+  context.mock.method(models.ProduceModel, 'create', async (documents: Array<Record<string, unknown>>) => {
+    assert.deepEqual(documents[0]!.location, { status: 'unavailable' });
+    const now = new Date();
+    return [{ ...documents[0], _id: 'produce-without-location', createdAt: now, updatedAt: now }] as never;
+  });
+  const unavailable = await post('/api/farmer/produce', makeForm(image, { location: JSON.stringify({ status: 'unavailable' }) }));
+  assert.equal(unavailable.status, 201);
+  const unavailableBody = await unavailable.json() as { item: { location: { status: string } } };
+  assert.deepEqual(unavailableBody.item.location, { status: 'unavailable' });
+  assert.equal(uploadCount, 2, 'only the valid location request reaches image storage');
 });
 
 test('produce listing query is scoped to the authenticated Farmer', async (context) => {
@@ -173,9 +205,23 @@ test('produce listing query is scoped to the authenticated Farmer', async (conte
   const get = await withServer(context);
   const response = await get('/api/farmer/produce', undefined, 'GET');
   assert.equal(response.status, 200);
-  const body = await response.json() as { items: Array<{ name: string }> };
+  const body = await response.json() as { items: Array<{ name: string; location?: { status: string } }> };
   assert.deepEqual(body.items.map(({ name }) => name), ['Fictional Greens']);
   assert.equal(body.items.some(({ name }) => name === String(otherFarmerId)), false);
+  assert.equal(body.items[0]!.location, undefined, 'legacy records without location remain readable');
+});
+
+test('a different authenticated Farmer receives no listing or coordinates from another Farmer', async (context) => {
+  context.mock.method(models.SessionModel, 'findOne', async () => ({ farmerId: otherFarmerId, revokedAt: null, expiresAt: new Date(Date.now() + 60_000) }) as never);
+  context.mock.method(models.FarmerModel, 'findById', async () => ({ ...farmer, _id: otherFarmerId }) as never);
+  context.mock.method(models.ProduceModel, 'find', (query: unknown) => {
+    assert.equal(String((query as { farmerId: unknown }).farmerId), otherFarmerId);
+    return { sort: () => ({ lean: () => ({ exec: async () => [] }) }) } as never;
+  });
+  const get = await withServer(context);
+  const response = await get('/api/farmer/produce', undefined, 'GET');
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { items: [] });
 });
 
 test('produce creation rejects invalid quantity, missing photos, and more than five photos', async (context) => {

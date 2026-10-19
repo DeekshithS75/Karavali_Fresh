@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
+import * as Location from 'expo-location';
 
 import { BrandHeader, MarketColors, ScreenFrame, SectionHeading } from '@/components/marketplace-ui';
 import { FarmerDashboardGuard } from '@/components/farmer-auth-flow';
@@ -15,6 +16,7 @@ const MAX_IMAGE_SIZE = 8 * 1024 * 1024;
 const photoMimeTypes = ['image/jpeg', 'image/png', 'image/webp'];
 
 type CapturedPhoto = { uri: string; mimeType?: string; fileSize?: number };
+type ProduceLocation = NonNullable<FarmerProduce['location']>;
 type FormError = 'nameRequired' | 'nameTooLong' | 'quantityInvalid' | 'priceInvalid' | 'photoCount' | 'photoTooLarge' | 'photoInvalid' | null;
 
 function createSubmissionId() {
@@ -29,6 +31,8 @@ export default function FarmerAddProduceScreen() {
   const [pricePerUnit, setPricePerUnit] = useState('');
   const [unit, setUnit] = useState<FarmerProduce['unit']>('kg');
   const [photos, setPhotos] = useState<CapturedPhoto[]>([]);
+  const [produceLocation, setProduceLocation] = useState<ProduceLocation | null>(null);
+  const [locationMessage, setLocationMessage] = useState('produce.locationPending');
   const [cameraMessage, setCameraMessage] = useState<string | null>(null);
   const [speechMessage, setSpeechMessage] = useState<string | null>(null);
   const [formError, setFormError] = useState<FormError>(null);
@@ -41,6 +45,45 @@ export default function FarmerAddProduceScreen() {
   const [marketQuoteError, setMarketQuoteError] = useState<string | null>(null);
   const marketQuoteController = useRef<AbortController | null>(null);
   const submissionId = useRef(createSubmissionId());
+  const locationCaptureAttempted = useRef(false);
+
+  const captureProduceLocation = async (): Promise<ProduceLocation> => {
+    if (locationCaptureAttempted.current) return produceLocation ?? { status: 'unavailable' };
+    locationCaptureAttempted.current = true;
+    try {
+      const permission = await Location.requestForegroundPermissionsAsync();
+      if (!permission.granted) {
+        setLocationMessage('produce.locationUnavailable');
+        const unavailable = { status: 'unavailable' } as const;
+        setProduceLocation(unavailable);
+        return unavailable;
+      }
+      const position = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      if (position.coords.accuracy == null || !Number.isFinite(position.coords.latitude) || position.coords.latitude < -90 || position.coords.latitude > 90 ||
+          !Number.isFinite(position.coords.longitude) || position.coords.longitude < -180 || position.coords.longitude > 180 ||
+          !Number.isFinite(position.coords.accuracy) || position.coords.accuracy < 0 || position.coords.accuracy > 100_000 || !Number.isFinite(position.timestamp)) {
+        setLocationMessage('produce.locationUnavailable');
+        const unavailable = { status: 'unavailable' } as const;
+        setProduceLocation(unavailable);
+        return unavailable;
+      }
+      const captured = {
+        status: 'captured' as const,
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        accuracyMeters: position.coords.accuracy,
+        capturedAt: new Date(position.timestamp).toISOString(),
+      };
+      setLocationMessage('produce.locationCaptured');
+      setProduceLocation(captured);
+      return captured;
+    } catch {
+      setLocationMessage('produce.locationUnavailable');
+      const unavailable = { status: 'unavailable' } as const;
+      setProduceLocation(unavailable);
+      return unavailable;
+    }
+  };
 
   useEffect(() => () => marketQuoteController.current?.abort(), []);
 
@@ -114,6 +157,7 @@ export default function FarmerAddProduceScreen() {
       if (asset.fileSize && asset.fileSize > MAX_IMAGE_SIZE) { setFormError('photoTooLarge'); return; }
       if (asset.mimeType && !photoMimeTypes.includes(asset.mimeType)) { setFormError('photoInvalid'); return; }
       setFormError(null);
+      if (photos.length === 0 && replaceIndex === undefined) await captureProduceLocation();
       submissionId.current = createSubmissionId();
       setPhotos((current) => replaceIndex === undefined
         ? current.length < 5 ? [...current, { uri: asset.uri, mimeType: asset.mimeType, fileSize: asset.fileSize }] : current
@@ -151,7 +195,7 @@ export default function FarmerAddProduceScreen() {
     if (photos.some((photo) => photo.mimeType && !photoMimeTypes.includes(photo.mimeType))) { setFormError('photoInvalid'); return; }
     setSaving(true);
     try {
-      await createFarmerProduce({ name, sourceLanguage: language, quantity: String(parsedQuantity), unit, ...(parsedPrice === null ? {} : { pricePerUnit: String(parsedPrice), priceUnit: unit }), photos }, submissionId.current);
+      await createFarmerProduce({ name, sourceLanguage: language, quantity: String(parsedQuantity), unit, location: produceLocation ?? { status: 'unavailable' }, ...(parsedPrice === null ? {} : { pricePerUnit: String(parsedPrice), priceUnit: unit }), photos }, submissionId.current);
       router.replace({ pathname: '/farmer', params: { produceAdded: '1' } });
     } catch (error) {
       if (error instanceof Error && error.message === 'invalidDocument') setSubmitError('produce.uploadInvalid');
@@ -228,6 +272,8 @@ export default function FarmerAddProduceScreen() {
           {capturing ? <ActivityIndicator color={MarketColors.green} /> : <Text style={styles.captureText}>＋ {t('produce.capturePhoto')}</Text>}
         </Pressable>
         <Text style={styles.help}>{t('produce.cameraOnlyNote')}</Text>
+        <Text accessibilityRole="summary" style={produceLocation?.status === 'captured' ? styles.successText : styles.help}>{t(locationMessage as Parameters<typeof t>[0])}</Text>
+        {produceLocation?.status === 'unavailable' ? <Text style={styles.help}>{t('produce.locationOptional')}</Text> : null}
         {cameraMessage ? <Text accessibilityRole="alert" style={styles.error}>{t(cameraMessage as Parameters<typeof t>[0])}</Text> : null}
         {photos.length ? <View style={styles.photoGrid}>{photos.map((photo, index) => <View key={`${photo.uri}-${index}`} style={styles.photoCard}>
           <Image source={{ uri: photo.uri }} contentFit="cover" style={styles.photo} accessibilityLabel={`${t('produce.photoPreview')} ${index + 1}`} />

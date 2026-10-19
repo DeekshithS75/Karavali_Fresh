@@ -63,6 +63,19 @@ const produceInputSchema = z.object({
   unit: z.enum(['kg', 'quintal', 'bunch', 'pieces']),
   pricePerUnit: z.preprocess((value) => value === '' || value == null ? null : value, z.coerce.number().finite().positive().max(1_000_000_000).nullable().optional()),
   priceUnit: z.enum(['kg', 'quintal', 'bunch', 'pieces']).optional(),
+  location: z.preprocess((value) => {
+    if (typeof value !== 'string') return value;
+    try { return JSON.parse(value); } catch { return value; }
+  }, z.discriminatedUnion('status', [
+    z.object({ status: z.literal('unavailable') }).strict(),
+    z.object({
+      status: z.literal('captured'),
+      latitude: z.number().finite().min(-90).max(90),
+      longitude: z.number().finite().min(-180).max(180),
+      accuracyMeters: z.number().finite().min(0).max(100_000),
+      capturedAt: z.string().datetime({ offset: true }).transform((value) => new Date(value)),
+    }).strict(),
+  ])).optional(),
 });
 const producePriceSchema = z.object({ pricePerUnit: z.coerce.number().finite().positive().max(1_000_000_000) });
 const submissionIdSchema = z.string().uuid();
@@ -341,7 +354,7 @@ app.get('/api/farmer/profile', async (request, response) => {
   } catch (error) { return sendError(response, error); }
 });
 
-function formatProduce(record: { id: string; name: string; sourceLanguage?: 'en' | 'kn' | 'tcy'; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit?: number | null; priceUnit?: string | null; status: string; photos: Array<{ storageKey?: string; publicId?: string; assetId?: string; resourceType?: 'image'; format?: string; width?: number; height?: number; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date }) {
+function formatProduce(record: { id: string; name: string; sourceLanguage?: 'en' | 'kn' | 'tcy'; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit?: number | null; priceUnit?: string | null; status: string; location?: { status: 'captured' | 'unavailable'; latitude?: number; longitude?: number; accuracyMeters?: number; capturedAt?: Date }; photos: Array<{ storageKey?: string; publicId?: string; assetId?: string; resourceType?: 'image'; format?: string; width?: number; height?: number; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date }) {
   return {
     id: record.id,
     name: record.name,
@@ -352,6 +365,7 @@ function formatProduce(record: { id: string; name: string; sourceLanguage?: 'en'
     pricePerUnit: record.pricePerUnit ?? null,
     priceUnit: record.priceUnit ?? null,
     status: record.status,
+    ...(record.location ? { location: record.location } : {}),
     photos: record.photos.map((photo, index) => ({
       url: `/api/farmer/produce/${record.id}/photos/${index}`,
       mimeType: photo.mimeType,
@@ -366,7 +380,7 @@ app.get('/api/farmer/produce', async (request, response) => {
   try {
     const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
     const records = await ProduceModel.find({ farmerId: farmer._id }).sort({ createdAt: -1 }).lean().exec() as unknown as Array<{
-      _id: Types.ObjectId; name: string; sourceLanguage: 'en' | 'kn' | 'tcy'; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit?: number | null; priceUnit?: string | null; status: string;
+      _id: Types.ObjectId; name: string; sourceLanguage: 'en' | 'kn' | 'tcy'; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit?: number | null; priceUnit?: string | null; status: string; location?: { status: 'captured' | 'unavailable'; latitude?: number; longitude?: number; accuracyMeters?: number; capturedAt?: Date };
       photos: Array<{ storageKey?: string; publicId?: string; assetId?: string; resourceType?: 'image'; format?: string; width?: number; height?: number; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date;
     }>;
     return response.json({ items: records.map((record) => formatProduce({ ...record, id: String(record._id) })) });
@@ -451,7 +465,7 @@ app.post('/api/farmer/produce', produceUpload.array('photos', 5), async (request
     const uploads = (request.files ?? []) as Express.Multer.File[];
     if (uploads.length < 2 || uploads.length > 5) throw new ApiError(400, 'produce_photo_count_invalid');
     const existing = await ProduceModel.findOne({ farmerId: farmer._id, submissionId }).lean().exec() as {
-      _id: Types.ObjectId; name: string; sourceLanguage: 'en' | 'kn' | 'tcy'; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit?: number | null; priceUnit?: string | null; status: string;
+      _id: Types.ObjectId; name: string; sourceLanguage: 'en' | 'kn' | 'tcy'; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit?: number | null; priceUnit?: string | null; status: string; location?: { status: 'captured' | 'unavailable'; latitude?: number; longitude?: number; accuracyMeters?: number; capturedAt?: Date };
       photos: Array<{ storageKey?: string; publicId?: string; assetId?: string; resourceType?: 'image'; format?: string; width?: number; height?: number; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date;
     } | null;
     if (existing) {
@@ -464,12 +478,13 @@ app.post('/api/farmer/produce', produceUpload.array('photos', 5), async (request
       _id: produceId, farmerId: farmer._id, submissionId, name: input.name, sourceLanguage: input.sourceLanguage,
       nameTranslations: input.nameTranslations, quantity: input.quantity, unit: input.unit,
       pricePerUnit: input.pricePerUnit ?? null, priceUnit: input.pricePerUnit == null ? null : (input.priceUnit ?? input.unit),
-      photos: storedPhotos, status: input.pricePerUnit == null ? 'awaiting_price' : 'priced_unpublished',
+      photos: storedPhotos, ...(input.location ? { location: input.location } : {}), status: input.pricePerUnit == null ? 'awaiting_price' : 'priced_unpublished',
     }]);
     return response.status(201).json({ item: formatProduce({
       id: String(record._id), name: record.name, sourceLanguage: record.sourceLanguage,
       nameTranslations: record.nameTranslations, quantity: record.quantity, unit: record.unit,
       pricePerUnit: record.pricePerUnit, priceUnit: record.priceUnit, status: record.status,
+      location: record.location,
       photos: record.photos, createdAt: record.createdAt, updatedAt: record.updatedAt,
     }) });
   } catch (error) {

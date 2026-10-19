@@ -34,6 +34,17 @@ npx expo run:android
 
 The web preview uses browser speech recognition where supported. If recognition is unavailable or permission is denied, manual name entry remains available.
 
+## Share the development app on the same Wi-Fi
+
+The development API listens on all network interfaces at port `4000`. To let another device on your Wi-Fi use the app:
+
+1. Keep this computer and your friend's device on the same Wi-Fi network. Guest Wi-Fi or client isolation can block device-to-device access.
+2. Find this computer's current LAN IPv4 address (currently `10.183.233.103`) and set `EXPO_PUBLIC_API_URL=http://<LAN-IP>:4000` in `mobile/.env`.
+3. Start the backend with `cd ../backend && npm run dev`, then start Expo from `mobile` with `npx expo start --host lan`.
+4. On your friend's device, open `http://<LAN-IP>:8081` in a browser. For a native app, install a development APK built with that same `EXPO_PUBLIC_API_URL` value.
+
+The LAN address can change when the computer reconnects to Wi-Fi. This is local-network access; devices outside this Wi-Fi need a deployed HTTPS app and API.
+
 You can start developing by editing the files inside the **src/app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
 
 ## Get a fresh project

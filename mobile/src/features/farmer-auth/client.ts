@@ -154,6 +154,7 @@ export type FarmerProduce = {
   pricePerUnit: number | null;
   priceUnit: FarmerProduce['unit'] | null;
   status: 'awaiting_price' | 'priced_unpublished';
+  location?: { status: 'captured'; latitude: number; longitude: number; accuracyMeters: number; capturedAt: string } | { status: 'unavailable' };
   photos: { url: string; mimeType: string; size: number; headers: { Authorization: string } }[];
   createdAt: string;
   updatedAt: string;
@@ -228,7 +229,7 @@ export async function getFarmerMarketQuote(input: {
   return result.comparison;
 }
 
-export async function createFarmerProduce(input: { name: string; sourceLanguage: 'en' | 'kn' | 'tcy'; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: string; unit: FarmerProduce['unit']; pricePerUnit?: string; priceUnit?: FarmerProduce['unit']; photos: { uri: string; mimeType?: string; fileSize?: number }[] }, submissionId: string) {
+export async function createFarmerProduce(input: { name: string; sourceLanguage: 'en' | 'kn' | 'tcy'; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: string; unit: FarmerProduce['unit']; pricePerUnit?: string; priceUnit?: FarmerProduce['unit']; location?: NonNullable<FarmerProduce['location']>; photos: { uri: string; mimeType?: string; fileSize?: number }[] }, submissionId: string) {
   const tokens = await readTokens();
   if (!tokens) throw new FarmerAuthError('unauthorized');
   const body = new FormData();
@@ -239,6 +240,7 @@ export async function createFarmerProduce(input: { name: string; sourceLanguage:
   body.append('unit', input.unit);
   if (input.pricePerUnit) body.append('pricePerUnit', input.pricePerUnit);
   if (input.priceUnit) body.append('priceUnit', input.priceUnit);
+  if (input.location) body.append('location', JSON.stringify(input.location));
   for (const [index, photo] of input.photos.entries()) {
     const mimeType = photo.mimeType && ['image/jpeg', 'image/png', 'image/webp'].includes(photo.mimeType) ? photo.mimeType : 'image/jpeg';
     if (Platform.OS === 'web') {

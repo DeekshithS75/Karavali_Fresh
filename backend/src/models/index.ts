@@ -84,6 +84,13 @@ const produceSchema = new Schema({
     mimeType: { type: String, enum: ['image/jpeg', 'image/png', 'image/webp'], required: true },
     size: { type: Number, required: true },
   }],
+  location: {
+    status: { type: String, enum: ['captured', 'unavailable'], required: true },
+    latitude: { type: Number, min: -90, max: 90 },
+    longitude: { type: Number, min: -180, max: 180 },
+    accuracyMeters: { type: Number, min: 0, max: 100_000 },
+    capturedAt: { type: Date },
+  },
   status: { type: String, enum: ['awaiting_price', 'priced_unpublished'], required: true, default: 'awaiting_price' },
 }, { timestamps: true, strict: 'throw' });
 produceSchema.index({ farmerId: 1, submissionId: 1 }, { unique: true });
