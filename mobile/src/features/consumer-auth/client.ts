@@ -3,8 +3,9 @@ import * as SecureStore from 'expo-secure-store';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { restoreFarmerSession, type FarmerSessionState } from '@/features/farmer-auth/session-lifecycle';
 import { CONSUMER_SESSION_KEY, createSessionStorage, type SessionTokens } from '@/features/farmer-auth/session-storage';
+import { getApiBase } from '@/features/api-base';
 
-const API_BASE = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
+const API_BASE = getApiBase();
 const storage = createSessionStorage(CONSUMER_SESSION_KEY, Platform.OS === 'web' ? AsyncStorage : {
   getItem: (key: string) => SecureStore.getItemAsync(key),
   setItem: (key: string, value: string) => SecureStore.setItemAsync(key, value),

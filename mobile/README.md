@@ -49,7 +49,7 @@ The web preview uses browser speech recognition where supported. If recognition 
 The development API listens on all network interfaces at port `4000`. To let another device on your Wi-Fi use the app:
 
 1. Keep the computer and phone on the same Wi-Fi or USB-tether network. Guest Wi-Fi, client isolation, or the computer firewall can block device-to-device access.
-2. Find the computer's current IPv4 address with `ip -4 route get 1.1.1.1` and set `EXPO_PUBLIC_API_URL=http://<address>:4000` in the ignored `mobile/.env`. Do not use `localhost` for a phone.
+2. Set `EXPO_PUBLIC_API_URL=http://<address>:4000` in the ignored `mobile/.env` as a fallback. A native development build derives the API host from the active Expo bundler, so changing LAN IPs are picked up after restarting Expo and reloading the app. Keep the phone and computer on the same reachable network; do not use `localhost` for a phone unless using `adb reverse`.
 3. Start the backend from `backend` with `npm run dev`, then start Expo from `mobile` with `npx expo start --host lan -c` so Metro reloads the environment value.
 4. Confirm `http://<address>:4000/health` returns `{"status":"ok"}` from the phone's browser, then open the Expo app. A standalone native build must be rebuilt with the same API URL.
 

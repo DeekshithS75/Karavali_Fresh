@@ -4,8 +4,9 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { restoreFarmerSession, revokeFarmerSession, type FarmerSessionState } from './session-lifecycle';
 import { createFarmerSessionStorage, type SessionTokens } from './session-storage';
 import { appendRegistrationDocument } from './document-upload';
+import { getApiBase } from '../api-base';
 
-const API_BASE = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '');
+const API_BASE = getApiBase();
 
 type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'exists' | 'documentRequired' | 'invalidDocument' | 'documentMismatch' | 'documentUnreadable' | 'documentFieldsMissing' | 'verificationNotConfigured' | 'verificationProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound' | 'profileNotFound' | 'verificationExpired' | 'configurationIncomplete' | 'privacyNoticeOutdated' | 'validationFailed' | 'produceRequestRejected' | 'producePhotoCount' | 'producePhotoTooLarge' | 'produceImageInvalid' | 'produceStorageUnavailable' | 'produceStorageUploadFailed' | 'producePriceInvalid' | 'produceNotFound' | 'produceDeleteCleanupFailed' | 'producePriceAlreadySet' | 'marketPriceUnavailable' | 'marketPriceNotConfigured' | 'marketPriceInvalidKey' | 'marketPriceRateLimited' | 'marketCommodityUnrecognized' | 'marketOriginInvalid';
 export type FarmerDocumentField = 'name' | 'age' | 'gender' | 'aadhaar' | 'address' | 'date_of_birth';
