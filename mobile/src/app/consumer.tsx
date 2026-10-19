@@ -16,6 +16,7 @@ export default function ConsumerHomeScreen() {
   const { t, language } = useLanguage();
   const params = useLocalSearchParams<{ section?: string; requestId?: string }>();
   const [profileName, setProfileName] = useState('');
+  const [pushStatus, setPushStatus] = useState<Awaited<ReturnType<typeof registerAccountForPush>> | null>(null);
   const [sessionReady, setSessionReady] = useState(false);
   const [sessionError, setSessionError] = useState(false);
   const [search, setSearch] = useState('');
@@ -39,6 +40,7 @@ export default function ConsumerHomeScreen() {
   const [requestKey, setRequestKey] = useState<string | null>(null);
   const [requestedQuantity, setRequestedQuantity] = useState('');
   const [requestError, setRequestError] = useState('');
+  const [requestSentFor, setRequestSentFor] = useState<string | null>(null);
   const [sendingRequest, setSendingRequest] = useState(false);
   const [myRequests, setMyRequests] = useState<ConsumerProduceRequest[]>([]);
   const [notifications, setNotifications] = useState<ConsumerNotification[]>([]);
@@ -61,7 +63,7 @@ export default function ConsumerHomeScreen() {
       setPhotoHeaders(headers);
       setSessionError(false);
         setSessionReady(true);
-        void registerAccountForPush('consumer');
+        void registerAccountForPush('consumer').then((status) => { if (isActive()) setPushStatus(status); });
     } catch (error) {
       if (!isActive()) return;
       if (error instanceof ConsumerAuthError && error.code === 'unauthorized') router.replace('/auth/consumer/login');
@@ -162,6 +164,7 @@ export default function ConsumerHomeScreen() {
       if (!requestKey) { setRequestError(t('consumer.requestError')); return; }
       await requestConsumerProduce(item.id, quantity, requestKey);
       setRequestFor(null);
+      setRequestSentFor(item.id);
       setRequestKey(null);
       setRequestedQuantity('');
       await refreshBuyerActivity();
@@ -198,7 +201,7 @@ export default function ConsumerHomeScreen() {
 
   return <ScreenFrame>
     <View style={styles.header}>
-      <View><Text style={styles.brandName}>{t('brand.name')}</Text><Text style={styles.role}>{t('consumer.role')}</Text></View>
+      <View style={styles.brandCopy}><Text style={styles.brandName}>{t('brand.name')}</Text><Text style={styles.role}>{t('consumer.headerSubtitle')}</Text></View>
       <View style={styles.headerActions}><LanguageSelector /><Pressable accessibilityRole="button" disabled={loggingOut} onPress={() => void signOut()} style={styles.logout}><Text style={styles.logoutText}>{t('consumer.logout')}</Text></Pressable></View>
     </View>
     <View style={styles.welcomePanel}>
@@ -206,6 +209,7 @@ export default function ConsumerHomeScreen() {
       <Text style={styles.greeting}>{t('consumer.greetingNamed').replace('{name}', profileName)}</Text>
       <Text style={styles.intro}>{t('consumer.intro')}</Text>
     </View>
+    {pushStatus && pushStatus !== 'registered' && pushStatus !== 'unsupported_platform' ? <View accessibilityRole="alert" style={styles.pushNotice}><Text style={styles.help}>{t(pushStatus === 'denied' ? 'notifications.push.denied' : pushStatus === 'project_not_configured' ? 'notifications.push.projectMissing' : 'notifications.push.unavailable')}</Text></View> : null}
     <View style={styles.activityTabs}>
       <Pressable accessibilityRole="button" onPress={() => { router.setParams({ section: undefined, requestId: undefined }); setSection('browse'); }} style={[styles.activityTab, activeSection === 'browse' && styles.activityTabActive]}><Text style={[styles.activityTabText, activeSection === 'browse' && styles.activityTabTextActive]}>{t('consumer.browseTab')}</Text></Pressable>
       <Pressable accessibilityRole="button" onPress={() => { router.setParams({ section: undefined, requestId: undefined }); setSection('requests'); void refreshBuyerActivity(); }} style={[styles.activityTab, activeSection === 'requests' && styles.activityTabActive]}><Text style={[styles.activityTabText, activeSection === 'requests' && styles.activityTabTextActive]}>{t('consumer.requestsTab')}</Text></Pressable>
@@ -238,6 +242,7 @@ export default function ConsumerHomeScreen() {
               <Text style={styles.price}>{t('consumer.askingPrice')}: {new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(item.pricePerUnit)} / {t(`produce.priceUnit.${item.priceUnit}` as never)}</Text>
               {item.marketComparison?.status === 'available' && item.marketComparison.items.some((quote) => quote.modalPrice !== null && !quote.stale) ? <><Text style={styles.marketPrice}>{t('consumer.marketPrice')}: {new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(item.marketComparison.items.find((quote) => quote.modalPrice !== null && !quote.stale)!.modalPrice!)} · {item.marketComparison.items.find((quote) => quote.modalPrice !== null && !quote.stale)!.sourceDate}</Text><Text style={styles.help}>{t('consumer.marketRegionalShort')}</Text></> : <Text style={styles.help}>{t('consumer.marketUnavailable')}</Text>}
               {item.farmerName ? <Text style={styles.locality}>{t('consumer.farmerName')}: {item.farmerName}</Text> : null}
+              {requestSentFor === item.id ? <Text accessibilityRole="alert" style={styles.requestSuccess}>{t('consumer.requestSent')}</Text> : null}
               {requestFor === item.id ? <View style={styles.requestForm}>
                 <Text style={styles.quantity}>{t('consumer.requestUnit').replace('{unit}', t(('produce.unit.' + item.unit) as never))}</Text>
                 <TextInput accessibilityLabel={t('consumer.requestQuantity')} keyboardType="decimal-pad" value={requestedQuantity} onChangeText={setRequestedQuantity} placeholder={t('consumer.requestQuantity')} style={styles.requestInput} />
@@ -281,11 +286,11 @@ export default function ConsumerHomeScreen() {
 }
 
 const styles = StyleSheet.create({
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }, headerActions: { flexDirection: 'row', alignItems: 'center', gap: 6 }, brandName: { color: MarketColors.text, fontSize: 18, fontWeight: '800' }, role: { color: MarketColors.muted, fontSize: 9, fontWeight: '700', letterSpacing: 1, marginTop: 2 }, logout: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 14, borderRadius: 12, backgroundColor: MarketColors.greenSoft }, logoutText: { color: MarketColors.greenDark, fontSize: 13, fontWeight: '800' },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }, headerActions: { flexDirection: 'row', alignItems: 'center', gap: 6 }, brandCopy: { flexShrink: 1, paddingRight: 8 }, brandName: { color: MarketColors.text, fontSize: 18, fontWeight: '800', letterSpacing: -0.35 }, role: { color: MarketColors.muted, fontSize: 9, fontWeight: '700', letterSpacing: 0.35, marginTop: 3 }, logout: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 14, borderRadius: 12, backgroundColor: MarketColors.greenSoft }, logoutText: { color: MarketColors.greenDark, fontSize: 13, fontWeight: '800' },
   welcomePanel: { backgroundColor: MarketColors.greenSoft, borderRadius: 20, padding: 18, marginBottom: 14 }, eyebrow: { color: MarketColors.green, fontSize: 10, fontWeight: '800', letterSpacing: 1.2 }, greeting: { color: MarketColors.text, fontSize: 23, lineHeight: 29, fontWeight: '800', marginTop: 7 }, intro: { color: MarketColors.muted, fontSize: 13, lineHeight: 19, marginTop: 4 },
   searchBox: { minHeight: 50, flexDirection: 'row', alignItems: 'center', backgroundColor: MarketColors.card, borderWidth: 1, borderColor: MarketColors.border, borderRadius: 14, paddingHorizontal: 13, marginBottom: 17 }, searchIcon: { color: MarketColors.green, fontSize: 24, lineHeight: 27, marginRight: 9 }, searchInput: { flex: 1, minHeight: 48, color: MarketColors.text, fontSize: 14 },
   sortSection: { gap: 8, marginBottom: 20 }, sortLabel: { color: MarketColors.text, fontWeight: '700', fontSize: 13 }, sortButtons: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' }, sortButton: { minHeight: 42, justifyContent: 'center', paddingHorizontal: 13, borderRadius: 12, borderWidth: 1, borderColor: MarketColors.border, backgroundColor: MarketColors.card }, sortSelected: { borderColor: MarketColors.green, backgroundColor: MarketColors.greenSoft }, sortText: { color: MarketColors.text, fontSize: 12, fontWeight: '700' }, sortTextSelected: { color: MarketColors.greenDark },
-  section: { marginBottom: 24 }, listings: { gap: 10 }, card: { flexDirection: 'row', gap: 12, padding: 11, borderRadius: 16, borderWidth: 1, borderColor: MarketColors.border, backgroundColor: MarketColors.card }, photo: { width: 90, height: 90, borderRadius: 12, backgroundColor: MarketColors.background }, photoPlaceholder: { width: 90, height: 90, borderRadius: 12, backgroundColor: MarketColors.greenSoft, alignItems: 'center', justifyContent: 'center' }, placeholderGlyph: { fontSize: 29 }, cardInfo: { flex: 1, justifyContent: 'center', gap: 4 }, productName: { color: MarketColors.text, fontSize: 16, fontWeight: '800' }, quantity: { color: MarketColors.muted, fontSize: 12 }, price: { color: MarketColors.greenDark, fontSize: 14, fontWeight: '800' }, locality: { color: MarketColors.muted, fontSize: 11 }, marketPrice: { color: MarketColors.blue, fontSize: 11, lineHeight: 15, fontWeight: '700' }, detailsButton: { minHeight: 36, alignSelf: 'flex-start', justifyContent: 'center', paddingHorizontal: 6 }, detailsText: { color: MarketColors.greenDark, fontSize: 12, fontWeight: '800' },
-  loading: { alignItems: 'center', gap: 8, paddingVertical: 28 }, help: { color: MarketColors.muted, fontSize: 12, lineHeight: 17 }, errorPanel: { gap: 8, backgroundColor: '#FFF4D6', borderRadius: 13, padding: 12 }, error: { color: '#B42318', fontSize: 13, lineHeight: 18 }, secondary: { minHeight: 44, alignItems: 'center', justifyContent: 'center', alignSelf: 'flex-start', paddingHorizontal: 14, borderRadius: 12, borderWidth: 1, borderColor: MarketColors.green }, secondaryText: { color: MarketColors.greenDark, fontWeight: '800', fontSize: 13 }, centerState: { minHeight: 280, alignItems: 'center', justifyContent: 'center', gap: 12 },
-  activityTabs: { flexDirection: 'row', gap: 6, marginBottom: 16 }, activityTab: { minHeight: 42, justifyContent: 'center', paddingHorizontal: 11, borderRadius: 12, borderWidth: 1, borderColor: MarketColors.border }, activityTabActive: { backgroundColor: MarketColors.greenSoft, borderColor: MarketColors.green }, activityTabText: { color: MarketColors.text, fontSize: 11, fontWeight: '700' }, activityTabTextActive: { color: MarketColors.greenDark }, activityCard: { gap: 7, padding: 14, borderRadius: 14, borderWidth: 1, borderColor: MarketColors.border, backgroundColor: MarketColors.card }, selectedRequest: { borderColor: MarketColors.green, borderWidth: 2 }, requestForm: { gap: 8, marginTop: 8 }, requestInput: { minHeight: 44, borderWidth: 1, borderColor: MarketColors.border, borderRadius: 10, paddingHorizontal: 10, color: MarketColors.text }, requestButton: { minHeight: 40, alignSelf: 'flex-start', justifyContent: 'center', backgroundColor: MarketColors.green, borderRadius: 10, paddingHorizontal: 12, marginTop: 5 }, requestButtonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 12 }, contactBox: { gap: 4, borderTopWidth: 1, borderColor: MarketColors.border, paddingTop: 9, marginTop: 5 },
+  section: { marginBottom: 24 }, listings: { gap: 12 }, card: { gap: 10, padding: 12, borderRadius: 18, borderWidth: 1, borderColor: MarketColors.border, backgroundColor: MarketColors.card }, photo: { width: '100%', height: 156, borderRadius: 13, backgroundColor: MarketColors.background }, photoPlaceholder: { width: '100%', height: 156, borderRadius: 13, backgroundColor: MarketColors.greenSoft, alignItems: 'center', justifyContent: 'center' }, placeholderGlyph: { fontSize: 38 }, cardInfo: { gap: 6 }, productName: { color: MarketColors.text, fontSize: 18, fontWeight: '800' }, quantity: { color: MarketColors.muted, fontSize: 12 }, price: { color: MarketColors.greenDark, fontSize: 15, fontWeight: '800' }, locality: { color: MarketColors.muted, fontSize: 11 }, marketPrice: { color: MarketColors.blue, fontSize: 11, lineHeight: 15, fontWeight: '700' }, detailsButton: { minHeight: 40, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center' }, detailsText: { color: MarketColors.greenDark, fontSize: 12, fontWeight: '800' }, requestSuccess: { color: MarketColors.greenDark, backgroundColor: MarketColors.greenSoft, borderRadius: 10, padding: 10, fontSize: 12, lineHeight: 17, fontWeight: '700' },
+  loading: { alignItems: 'center', gap: 8, paddingVertical: 28 }, help: { color: MarketColors.muted, fontSize: 12, lineHeight: 17 }, pushNotice: { backgroundColor: MarketColors.blueSoft, borderRadius: 12, padding: 11, marginBottom: 14 }, errorPanel: { gap: 8, backgroundColor: '#FFF4D6', borderRadius: 13, padding: 12 }, error: { color: '#B42318', fontSize: 13, lineHeight: 18 }, secondary: { minHeight: 44, alignItems: 'center', justifyContent: 'center', alignSelf: 'flex-start', paddingHorizontal: 14, borderRadius: 12, borderWidth: 1, borderColor: MarketColors.green }, secondaryText: { color: MarketColors.greenDark, fontWeight: '800', fontSize: 13 }, centerState: { minHeight: 280, alignItems: 'center', justifyContent: 'center', gap: 12 },
+  activityTabs: { flexDirection: 'row', gap: 6, marginBottom: 16 }, activityTab: { minHeight: 42, justifyContent: 'center', paddingHorizontal: 11, borderRadius: 12, borderWidth: 1, borderColor: MarketColors.border }, activityTabActive: { backgroundColor: MarketColors.greenSoft, borderColor: MarketColors.green }, activityTabText: { color: MarketColors.text, fontSize: 11, fontWeight: '700' }, activityTabTextActive: { color: MarketColors.greenDark }, activityCard: { gap: 7, padding: 14, borderRadius: 14, borderWidth: 1, borderColor: MarketColors.border, backgroundColor: MarketColors.card }, selectedRequest: { borderColor: MarketColors.green, borderWidth: 2 }, requestForm: { gap: 8, marginTop: 8 }, requestInput: { minHeight: 44, borderWidth: 1, borderColor: MarketColors.border, borderRadius: 10, paddingHorizontal: 10, color: MarketColors.text }, requestButton: { minHeight: 44, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center', backgroundColor: MarketColors.green, borderRadius: 10, paddingHorizontal: 12, marginTop: 5 }, requestButtonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 12 }, contactBox: { gap: 4, borderTopWidth: 1, borderColor: MarketColors.border, paddingTop: 9, marginTop: 5 },
 });

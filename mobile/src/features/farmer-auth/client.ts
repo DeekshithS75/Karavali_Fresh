@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import { File } from 'expo-file-system';
 import * as SecureStore from 'expo-secure-store';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { restoreFarmerSession, revokeFarmerSession, type FarmerSessionState } from './session-lifecycle';
@@ -283,15 +284,32 @@ export async function createFarmerProduce(input: { name: string; sourceLanguage:
   if (input.priceUnit) body.append('priceUnit', input.priceUnit);
   if (input.location) body.append('location', JSON.stringify(input.location));
   for (const [index, photo] of input.photos.entries()) {
-    const mimeType = photo.mimeType && ['image/jpeg', 'image/png', 'image/webp'].includes(photo.mimeType) ? photo.mimeType : 'image/jpeg';
+    const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp'];
     if (Platform.OS === 'web') {
+      const mimeType = photo.mimeType && allowedMimeTypes.includes(photo.mimeType) ? photo.mimeType : 'image/jpeg';
       const response = await fetch(photo.uri);
       if (!response.ok) throw new FarmerAuthError('invalidDocument');
       const blob = await response.blob();
       if (blob.size > 8 * 1024 * 1024 || blob.type !== mimeType) throw new FarmerAuthError('invalidDocument');
       body.append('photos', blob, `produce-${index + 1}.${mimeType.split('/')[1]}`);
     } else {
-      body.append('photos', { uri: photo.uri, name: `produce-${index + 1}.${mimeType.split('/')[1]}`, type: mimeType } as never);
+      // Stream the picker URI through Expo's Blob-compatible File instead of
+      // relying on React Native's legacy { uri, name, type } multipart part.
+      let file: File;
+      let fileSize: number;
+      let fileType: string;
+      try {
+        file = new File(photo.uri);
+        fileSize = file.size;
+        fileType = file.type;
+      } catch {
+        throw new FarmerAuthError('produceImageInvalid');
+      }
+      const mimeType = photo.mimeType && allowedMimeTypes.includes(photo.mimeType) ? photo.mimeType : fileType;
+      if (!fileSize || fileSize > 8 * 1024 * 1024 || !allowedMimeTypes.includes(mimeType)) {
+        throw new FarmerAuthError(fileSize > 8 * 1024 * 1024 ? 'producePhotoTooLarge' : 'produceImageInvalid');
+      }
+      body.append('photos', file, `produce-${index + 1}.${mimeType.split('/')[1]}`);
     }
   }
   const result = await request<{ item: FarmerProduce }>('/api/farmer/produce', {

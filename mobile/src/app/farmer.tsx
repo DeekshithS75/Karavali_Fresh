@@ -35,6 +35,7 @@ export default function FarmerHomeScreen() {
   const [incomingRequests, setIncomingRequests] = useState<FarmerProduceRequest[]>([]);
   const [recentPendingRequests, setRecentPendingRequests] = useState<FarmerProduceRequest[]>([]);
   const [farmerUnreadCount, setFarmerUnreadCount] = useState(0);
+  const [pushStatus, setPushStatus] = useState<Awaited<ReturnType<typeof registerAccountForPush>> | null>(null);
   const [requestActionId, setRequestActionId] = useState<string | null>(null);
   const [requestSectionError, setRequestSectionError] = useState(false);
   const [requestsLoading, setRequestsLoading] = useState(true);
@@ -80,7 +81,7 @@ export default function FarmerHomeScreen() {
         if (!active) return;
         setProfile(value);
         setProfileState('loaded');
-        void registerAccountForPush('farmer');
+        void registerAccountForPush('farmer').then((status) => { if (active) setPushStatus(status); });
       })
       .catch(async (error: unknown) => {
         if (!active || controller.signal.aborted) return;
@@ -209,6 +210,8 @@ export default function FarmerHomeScreen() {
         </Pressable>
       </View>
 
+      {pushStatus && pushStatus !== 'registered' && pushStatus !== 'unsupported_platform' ? <View accessibilityRole="alert" style={styles.pushNotice}><Text style={styles.listingMessage}>{t(pushStatus === 'denied' ? 'notifications.push.denied' : pushStatus === 'project_not_configured' ? 'notifications.push.projectMissing' : 'notifications.push.unavailable')}</Text></View> : null}
+
       {params.produceAdded === '1' ? <View accessibilityRole="alert" style={styles.savedNotice}><Text style={styles.savedNoticeText}>{t('produce.saved')}</Text></View> : params.producePriceAdded === '1' ? <View accessibilityRole="alert" style={styles.savedNotice}><Text style={styles.savedNoticeText}>{t('produce.priceSaved')}</Text></View> : null}
 
       <View style={styles.section}>
@@ -280,6 +283,7 @@ export default function FarmerHomeScreen() {
 }
 
 const styles = StyleSheet.create({
+  pushNotice: { backgroundColor: MarketColors.blueSoft, borderRadius: 12, padding: 11, marginBottom: 14 },
   welcomePanel: {
     backgroundColor: MarketColors.greenSoft,
     borderRadius: 22,

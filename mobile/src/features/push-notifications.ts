@@ -7,7 +7,8 @@ import { registerConsumerPushToken } from '@/features/consumer-auth/client';
 import { registerFarmerPushToken } from '@/features/farmer-auth/client';
 
 export async function registerAccountForPush(role: 'farmer' | 'consumer') {
-  if (Platform.OS === 'web' || !Device.isDevice) return 'unavailable' as const;
+  if (Platform.OS === 'web') return 'unsupported_platform' as const;
+  if (!Device.isDevice) return 'unavailable' as const;
   try {
     if (Platform.OS === 'android') await Notifications.setNotificationChannelAsync('requests', {
       name: 'Produce requests', importance: AndroidImportance.HIGH, vibrationPattern: [0, 250, 250, 250],

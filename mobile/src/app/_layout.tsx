@@ -6,6 +6,17 @@ import { routeForNotificationData } from '@/features/notification-navigation';
 
 import { LanguageProvider } from '@/localization/LanguageProvider';
 
+if (Platform.OS !== 'web') {
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowBanner: true,
+      shouldShowList: true,
+      shouldPlaySound: true,
+      shouldSetBadge: false,
+    }),
+  });
+}
+
 export default function RootLayout() {
   useEffect(() => {
     if (Platform.OS === 'web') return undefined;
