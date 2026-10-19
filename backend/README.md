@@ -8,7 +8,31 @@ Node.js + TypeScript + Express API for Farmer authentication and farmer-owned ma
 2. Generate independent random secrets for `TOKEN_HMAC_SECRET`, `PHONE_HASH_SECRET`, and `AADHAAR_HASH_SECRET`. Generate a random 32-byte key and base64 encode it for `AADHAAR_ENCRYPTION_KEY_BASE64`.
 3. Configure `NACALLER_KEY` from your NaCaller account. The key stays on the backend and is never sent to the mobile app.
 4. Configure `DATA_GOV_IN_API_KEY` for the data.gov.in Mandi resource. The key stays on the backend and is never sent to the mobile app.
-5. Run `npm install` and `npm run dev`.
+5. Set up Cloudinary as described below and add its credentials to `backend/.env`.
+6. Run `npm install` and `npm run dev`.
+
+## Produce photo storage (Cloudinary)
+
+Create or select a Cloudinary product environment, then copy its cloud name, API key and API secret into the backend environment:
+
+```dotenv
+CLOUDINARY_CLOUD_NAME=your-cloud-name
+CLOUDINARY_API_KEY=your-api-key
+CLOUDINARY_API_SECRET=your-api-secret
+```
+
+Keep all three values in `backend/.env` or the deployment platform's server-side secret store. Do not prefix them with `EXPO_PUBLIC_`, add them to `mobile/.env`, commit them, or print them in logs. If any value is missing, produce-photo uploads fail closed with a storage-configuration error.
+
+New photos are validated on the backend and uploaded over HTTPS as Cloudinary `authenticated` assets in `karavali-fresh/farmers/<farmerId>/produce/<produceId>`. MongoDB stores Cloudinary asset references and image metadata, never the file bytes. The existing authenticated photo API checks listing ownership before issuing a five-minute signed download URL; listing responses keep their app-local photo paths and do not include Cloudinary identifiers or credentials. Authenticated delivery keeps unpublished drafts private.
+
+Old listings that still reference local files continue to use their existing references and can be read while the source files remain in the configured local directory. Inspect and migrate them before removing that directory:
+
+```sh
+npm run migrate:produce-photos       # read-only dry run
+npm run migrate:produce-photos -- --apply
+```
+
+The migration uploads the legacy files and updates each MongoDB record before deleting those local files. On upload or database-update failure it removes newly uploaded Cloudinary assets where possible and leaves the existing MongoDB references and local files untouched. Keep a database backup and the local directory until the migration summary confirms completion. The current project image directory contains no local files; this does not establish whether MongoDB has legacy references, so run the dry run before cleanup.
 
 For browser development, the Expo preview at `http://localhost:8081` must call the backend at `http://localhost:4000` (set `EXPO_PUBLIC_API_URL` in `mobile/.env`). `MOBILE_ORIGIN` is a comma-separated allowlist; use `http://localhost:8081,http://127.0.0.1:8081` for local browser previews. The frontend and API use different ports. If the mobile app runs on a physical phone, use the development computer's reachable LAN IP for `EXPO_PUBLIC_API_URL` instead of `localhost`.
 

@@ -11,7 +11,7 @@ import { compareAadhaarDocument, isOcrConfigured, OCR_ENGINE_NAME, type Registra
 import { NaCallerError } from './providers/otp.js';
 import { ProviderNotConfiguredError } from './providers/errors.js';
 import { ApiError, assertRegistrationAvailable, cancelPhoneVerification, completePhoneVerification, createSession, enforceRateLimit, findAuthenticatedFarmer, findAuthenticatedSession, getPhoneVerificationStatus, startPhoneVerification } from './services/security.js';
-import { deleteProducePhotos, readProducePhoto, storeProducePhotos, ProduceStorageError } from './services/produce-storage.js';
+import { createProducePhotoDeliveryUrl, deleteProducePhotos, readLegacyProducePhoto, storeProducePhotos, ProduceStorageError } from './services/produce-storage.js';
 import { marketPriceProvider, MarketPriceProviderError, marketRecordKey, matchesProduceCommodity, type MarketPriceRecord } from './providers/market-prices.js';
 import { buildFarmerMarketComparison, previousArrivalDate, type FarmerProduceForMarket } from './services/market-comparison.js';
 
@@ -54,9 +54,15 @@ const registrationSchema = z.object({
 const challengeIdSchema = z.string().regex(/^[a-f\d]{24}$/i);
 const produceInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
+  sourceLanguage: z.enum(['en', 'kn', 'tcy']).default('en'),
+  nameTranslations: z.preprocess((value) => {
+    if (typeof value !== 'string') return value;
+    try { return JSON.parse(value); } catch { return value; }
+  }, z.object({ en: z.string().trim().max(120).optional(), kn: z.string().trim().max(120).optional(), tcy: z.string().trim().max(120).optional() }).optional()),
   quantity: z.coerce.number().finite().positive().max(1_000_000_000),
   unit: z.enum(['kg', 'quintal', 'bunch', 'pieces']),
-  pricePerUnit: z.coerce.number().finite().positive().max(1_000_000_000),
+  pricePerUnit: z.preprocess((value) => value === '' || value == null ? null : value, z.coerce.number().finite().positive().max(1_000_000_000).nullable().optional()),
+  priceUnit: z.enum(['kg', 'quintal', 'bunch', 'pieces']).optional(),
 });
 const producePriceSchema = z.object({ pricePerUnit: z.coerce.number().finite().positive().max(1_000_000_000) });
 const submissionIdSchema = z.string().uuid();
@@ -335,14 +341,16 @@ app.get('/api/farmer/profile', async (request, response) => {
   } catch (error) { return sendError(response, error); }
 });
 
-function formatProduce(record: { id: string; name: string; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit?: number | null; status: string; photos: Array<{ storageKey: string; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date }) {
+function formatProduce(record: { id: string; name: string; sourceLanguage?: 'en' | 'kn' | 'tcy'; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit?: number | null; priceUnit?: string | null; status: string; photos: Array<{ storageKey?: string; publicId?: string; assetId?: string; resourceType?: 'image'; format?: string; width?: number; height?: number; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date }) {
   return {
     id: record.id,
     name: record.name,
+    sourceLanguage: record.sourceLanguage ?? 'en',
     ...(record.nameTranslations ? { nameTranslations: record.nameTranslations } : {}),
     quantity: record.quantity,
     unit: record.unit,
     pricePerUnit: record.pricePerUnit ?? null,
+    priceUnit: record.priceUnit ?? null,
     status: record.status,
     photos: record.photos.map((photo, index) => ({
       url: `/api/farmer/produce/${record.id}/photos/${index}`,
@@ -358,8 +366,8 @@ app.get('/api/farmer/produce', async (request, response) => {
   try {
     const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
     const records = await ProduceModel.find({ farmerId: farmer._id }).sort({ createdAt: -1 }).lean().exec() as unknown as Array<{
-      _id: Types.ObjectId; name: string; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit?: number | null; status: string;
-      photos: Array<{ storageKey: string; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date;
+      _id: Types.ObjectId; name: string; sourceLanguage: 'en' | 'kn' | 'tcy'; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit?: number | null; priceUnit?: string | null; status: string;
+      photos: Array<{ storageKey?: string; publicId?: string; assetId?: string; resourceType?: 'image'; format?: string; width?: number; height?: number; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date;
     }>;
     return response.json({ items: records.map((record) => formatProduce({ ...record, id: String(record._id) })) });
   } catch (error) { return sendError(response, error); }
@@ -443,29 +451,26 @@ app.post('/api/farmer/produce', produceUpload.array('photos', 5), async (request
     const uploads = (request.files ?? []) as Express.Multer.File[];
     if (uploads.length < 2 || uploads.length > 5) throw new ApiError(400, 'produce_photo_count_invalid');
     const existing = await ProduceModel.findOne({ farmerId: farmer._id, submissionId }).lean().exec() as {
-      _id: Types.ObjectId; name: string; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit?: number | null; status: string;
-      photos: Array<{ storageKey: string; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date;
+      _id: Types.ObjectId; name: string; sourceLanguage: 'en' | 'kn' | 'tcy'; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit?: number | null; priceUnit?: string | null; status: string;
+      photos: Array<{ storageKey?: string; publicId?: string; assetId?: string; resourceType?: 'image'; format?: string; width?: number; height?: number; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date;
     } | null;
     if (existing) {
-      if (existing.status === 'awaiting_price' && existing.pricePerUnit == null) {
-        const updated = await ProduceModel.findOneAndUpdate(
-          { _id: existing._id, farmerId: farmer._id, status: 'awaiting_price', pricePerUnit: null },
-          { $set: { pricePerUnit: input.pricePerUnit, status: 'priced_unpublished' } },
-          { new: true, runValidators: true },
-        ).lean().exec() as typeof existing | null;
-        if (updated) return response.status(200).json({ item: formatProduce({ ...updated, id: String(updated._id) }) });
-      }
       return response.status(200).json({ item: formatProduce({ ...existing, id: String(existing._id) }) });
     }
 
-    storedPhotos = await storeProducePhotos(uploads);
+    const produceId = new Types.ObjectId();
+    storedPhotos = await storeProducePhotos(uploads, String(farmer._id), String(produceId));
     const [record] = await ProduceModel.create([{
-      farmerId: farmer._id, submissionId, name: input.name, quantity: input.quantity, unit: input.unit,
-      pricePerUnit: input.pricePerUnit, photos: storedPhotos, status: 'priced_unpublished',
+      _id: produceId, farmerId: farmer._id, submissionId, name: input.name, sourceLanguage: input.sourceLanguage,
+      nameTranslations: input.nameTranslations, quantity: input.quantity, unit: input.unit,
+      pricePerUnit: input.pricePerUnit ?? null, priceUnit: input.pricePerUnit == null ? null : (input.priceUnit ?? input.unit),
+      photos: storedPhotos, status: input.pricePerUnit == null ? 'awaiting_price' : 'priced_unpublished',
     }]);
     return response.status(201).json({ item: formatProduce({
-      id: String(record._id), name: record.name, quantity: record.quantity, unit: record.unit,
-      pricePerUnit: record.pricePerUnit, status: record.status, photos: record.photos, createdAt: record.createdAt, updatedAt: record.updatedAt,
+      id: String(record._id), name: record.name, sourceLanguage: record.sourceLanguage,
+      nameTranslations: record.nameTranslations, quantity: record.quantity, unit: record.unit,
+      pricePerUnit: record.pricePerUnit, priceUnit: record.priceUnit, status: record.status,
+      photos: record.photos, createdAt: record.createdAt, updatedAt: record.updatedAt,
     }) });
   } catch (error) {
     await deleteProducePhotos(storedPhotos);
@@ -485,19 +490,22 @@ app.patch('/api/farmer/produce/:produceId/price', async (request, response) => {
     const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
     if (!Types.ObjectId.isValid(request.params.produceId)) throw new ApiError(404, 'produce_not_found');
     const { pricePerUnit } = producePriceSchema.parse(request.body);
-    const record = await ProduceModel.findOneAndUpdate(
-      { _id: request.params.produceId, farmerId: farmer._id, status: 'awaiting_price', pricePerUnit: null },
-      { $set: { pricePerUnit, status: 'priced_unpublished' } },
-      { new: true, runValidators: true },
-    ).lean().exec() as {
-      _id: Types.ObjectId; name: string; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit: number | null; status: string;
-      photos: Array<{ storageKey: string; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date;
-    } | null;
-    if (!record) {
+    const awaitingRecord = await ProduceModel.findOne({ _id: request.params.produceId, farmerId: farmer._id, status: 'awaiting_price', pricePerUnit: null })
+      .select('unit').lean().exec() as { unit: string } | null;
+    if (!awaitingRecord) {
       const ownedRecord = await ProduceModel.findOne({ _id: request.params.produceId, farmerId: farmer._id }).select('_id').lean().exec();
       if (!ownedRecord) throw new ApiError(404, 'produce_not_found');
       throw new ApiError(409, 'produce_price_already_set');
     }
+    const record = await ProduceModel.findOneAndUpdate(
+      { _id: request.params.produceId, farmerId: farmer._id, status: 'awaiting_price', pricePerUnit: null },
+      { $set: { pricePerUnit, priceUnit: awaitingRecord.unit, status: 'priced_unpublished' } },
+      { new: true, runValidators: true },
+    ).lean().exec() as {
+      _id: Types.ObjectId; name: string; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string; pricePerUnit: number | null; status: string;
+      photos: Array<{ storageKey?: string; publicId?: string; assetId?: string; resourceType?: 'image'; format?: string; width?: number; height?: number; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date;
+    } | null;
+    if (!record) throw new ApiError(409, 'produce_price_already_set');
     return response.json({ item: formatProduce({ ...record, id: String(record._id) }) });
   } catch (error) { return sendError(response, error); }
 });
@@ -507,12 +515,16 @@ app.get('/api/farmer/produce/:produceId/photos/:photoIndex', async (request, res
     const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
     if (!Types.ObjectId.isValid(request.params.produceId)) throw new ApiError(404, 'produce_image_not_found');
     const record = await ProduceModel.findOne({ _id: request.params.produceId, farmerId: farmer._id }).lean().exec() as {
-      photos: Array<{ storageKey: string; mimeType: string }>;
+      photos: Array<{ storageKey?: string; publicId?: string; assetId?: string; resourceType?: 'image'; format?: string; mimeType: string }>;
     } | null;
     const index = Number(request.params.photoIndex);
     if (!record || !Number.isInteger(index) || index < 0 || index >= record.photos.length) throw new ProduceStorageError('not_found');
     const photo = record.photos[index]!;
-    const bytes = await readProducePhoto(photo.storageKey);
+    if (photo.publicId && photo.format) {
+      return response.set('Cache-Control', 'private, no-store').redirect(302, createProducePhotoDeliveryUrl(photo));
+    }
+    if (!photo.storageKey) throw new ProduceStorageError('not_found');
+    const bytes = await readLegacyProducePhoto(photo.storageKey);
     response.type(photo.mimeType).set('Cache-Control', 'private, no-store').send(bytes);
   } catch (error) { return sendError(response, error); }
 });

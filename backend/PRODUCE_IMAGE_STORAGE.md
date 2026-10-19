@@ -1,7 +1,9 @@
-# Produce image storage
+# Produce photo storage
 
-The current adapter writes validated produce photos to `.local-produce-images` in the backend directory (or `PRODUCE_IMAGE_DIR` when set). This adapter is enabled only when `NODE_ENV=development` and `PRODUCE_IMAGE_STORAGE=local` (the default in development).
+New validated produce images are uploaded to Cloudinary as `authenticated` image assets. The folder uses server-derived Farmer and produce IDs. MongoDB stores Cloudinary public and asset IDs, resource type, format, dimensions, MIME type and byte size; it does not store base64 image data.
 
-This local filesystem storage is for development only. It is not suitable for ephemeral production hosts, horizontally scaled deployments, or durable backups. Production uploads return `produce_image_storage_not_configured` until a durable adapter (for example, an object-storage implementation) is configured. Image files are not stored in MongoDB or embedded in Farmer records.
+Configure `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY` and `CLOUDINARY_API_SECRET` in `backend/.env` or the backend's secret store. These are server-only values and must not be exposed through Expo variables, API responses or logs. Uploads fail closed when configuration is incomplete; there is no local filesystem fallback for new uploads.
 
-The API validates image bytes with Sharp, accepts JPEG, PNG, and WebP only, and stores generated file keys and metadata in the FarmerProduce collection. Authenticated image reads are scoped to the owning Farmer session.
+Photo reads remain behind the existing authenticated Farmer endpoint and ownership lookup. After that check, the backend redirects to a five-minute Cloudinary signed download URL for the authenticated asset. The mobile app continues to request the existing app-local photo path.
+
+Records created by the former local adapter may still reference `storageKey`. They remain readable from the original local photo directory until migrated. Use `npm run migrate:produce-photos` for a dry run and `npm run migrate:produce-photos -- --apply` to upload them and update MongoDB. The migration deletes each local file only after its Cloudinary upload and MongoDB reference update succeed. Do not remove old local files or claim they have migrated until the migration has completed and been checked.

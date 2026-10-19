@@ -12,11 +12,13 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "tsx --test test/*.test.ts",
-    "lint": "eslint src test"
+    "lint": "eslint src test scripts",
+    "migrate:produce-photos": "tsx scripts/migrate-local-produce-photos.ts"
   },
   "dependencies": {
     "@tesseract.js-data/eng": "^1.0.0",
     "@tesseract.js-data/kan": "^1.0.0",
+    "cloudinary": "^2.11.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^5.1.0",

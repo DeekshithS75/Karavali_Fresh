@@ -147,20 +147,23 @@ export type FarmerProfile = { fullName: string };
 export type FarmerProduce = {
   id: string;
   name: string;
+  sourceLanguage: 'en' | 'kn' | 'tcy';
   nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>;
   quantity: number;
   unit: 'kg' | 'quintal' | 'bunch' | 'pieces';
   pricePerUnit: number | null;
+  priceUnit: FarmerProduce['unit'] | null;
   status: 'awaiting_price' | 'priced_unpublished';
   photos: { url: string; mimeType: string; size: number; headers: { Authorization: string } }[];
   createdAt: string;
   updatedAt: string;
 };
 
-export async function getFarmerProduce(signal?: AbortSignal): Promise<FarmerProduce[]> {
+export async function getFarmerProduce(signal?: AbortSignal, refreshKey?: string): Promise<FarmerProduce[]> {
   const tokens = await readTokens();
   if (!tokens) throw new FarmerAuthError('unauthorized');
-  const result = await request<{ items: (Omit<FarmerProduce, 'photos'> & { photos: Omit<FarmerProduce['photos'][number], 'headers'>[] })[] }>('/api/farmer/produce', {
+  const refreshQuery = refreshKey === undefined ? '' : `?refresh=${encodeURIComponent(refreshKey)}`;
+  const result = await request<{ items: (Omit<FarmerProduce, 'photos'> & { photos: Omit<FarmerProduce['photos'][number], 'headers'>[] })[] }>(`/api/farmer/produce${refreshQuery}`, {
     headers: { Authorization: `Bearer ${tokens.accessToken}` }, signal,
   });
   if (!Array.isArray(result.items)) throw new FarmerAuthError('rejected');
@@ -225,14 +228,17 @@ export async function getFarmerMarketQuote(input: {
   return result.comparison;
 }
 
-export async function createFarmerProduce(input: { name: string; quantity: string; unit: FarmerProduce['unit']; pricePerUnit: string; photos: { uri: string; mimeType?: string; fileSize?: number }[] }, submissionId: string) {
+export async function createFarmerProduce(input: { name: string; sourceLanguage: 'en' | 'kn' | 'tcy'; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: string; unit: FarmerProduce['unit']; pricePerUnit?: string; priceUnit?: FarmerProduce['unit']; photos: { uri: string; mimeType?: string; fileSize?: number }[] }, submissionId: string) {
   const tokens = await readTokens();
   if (!tokens) throw new FarmerAuthError('unauthorized');
   const body = new FormData();
   body.append('name', input.name.trim());
+  body.append('sourceLanguage', input.sourceLanguage);
+  if (input.nameTranslations) body.append('nameTranslations', JSON.stringify(input.nameTranslations));
   body.append('quantity', input.quantity);
   body.append('unit', input.unit);
-  body.append('pricePerUnit', input.pricePerUnit);
+  if (input.pricePerUnit) body.append('pricePerUnit', input.pricePerUnit);
+  if (input.priceUnit) body.append('priceUnit', input.priceUnit);
   for (const [index, photo] of input.photos.entries()) {
     const mimeType = photo.mimeType && ['image/jpeg', 'image/png', 'image/webp'].includes(photo.mimeType) ? photo.mimeType : 'image/jpeg';
     if (Platform.OS === 'web') {

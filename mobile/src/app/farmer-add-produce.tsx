@@ -144,14 +144,14 @@ export default function FarmerAddProduceScreen() {
     if (name.trim().length > 120) { setFormError('nameTooLong'); return; }
     const parsedQuantity = Number(quantity);
     if (!quantity.trim() || !Number.isFinite(parsedQuantity) || parsedQuantity <= 0) { setFormError('quantityInvalid'); return; }
-    const parsedPrice = Number(pricePerUnit);
-    if (!pricePerUnit.trim() || !Number.isFinite(parsedPrice) || parsedPrice <= 0) { setFormError('priceInvalid'); return; }
+    const parsedPrice = pricePerUnit.trim() ? Number(pricePerUnit) : null;
+    if (parsedPrice !== null && (!Number.isFinite(parsedPrice) || parsedPrice <= 0)) { setFormError('priceInvalid'); return; }
     if (photos.length < 2 || photos.length > 5) { setFormError('photoCount'); return; }
     if (photos.some((photo) => photo.fileSize && photo.fileSize > MAX_IMAGE_SIZE)) { setFormError('photoTooLarge'); return; }
     if (photos.some((photo) => photo.mimeType && !photoMimeTypes.includes(photo.mimeType))) { setFormError('photoInvalid'); return; }
     setSaving(true);
     try {
-      await createFarmerProduce({ name, quantity: String(parsedQuantity), unit, pricePerUnit: String(parsedPrice), photos }, submissionId.current);
+      await createFarmerProduce({ name, sourceLanguage: language, quantity: String(parsedQuantity), unit, ...(parsedPrice === null ? {} : { pricePerUnit: String(parsedPrice), priceUnit: unit }), photos }, submissionId.current);
       router.replace({ pathname: '/farmer', params: { produceAdded: '1' } });
     } catch (error) {
       if (error instanceof Error && error.message === 'invalidDocument') setSubmitError('produce.uploadInvalid');
@@ -210,7 +210,7 @@ export default function FarmerAddProduceScreen() {
         </View>
 
         <View style={styles.field}>
-          <Text style={styles.label}>{t('produce.sellingPrice')} *</Text>
+          <Text style={styles.label}>{t('produce.sellingPrice')}</Text>
           <View style={styles.priceRow}>
             <Text style={styles.currencyPrefix}>₹</Text>
             <TextInput editable={!saving} value={pricePerUnit} onChangeText={(value) => { setPricePerUnit(value.replace(/[^\d.]/g, '')); setFormError(null); submissionId.current = createSubmissionId(); }} keyboardType="decimal-pad" inputMode="decimal" accessibilityLabel={`${t('produce.sellingPrice')} ${t(`produce.priceUnit.${unit}` as Parameters<typeof t>[0])}`} placeholder={t('produce.pricePlaceholder')} placeholderTextColor={MarketColors.muted} style={[styles.input, styles.priceInput]} />

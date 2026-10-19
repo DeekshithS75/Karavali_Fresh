@@ -62,6 +62,7 @@ const produceSchema = new Schema({
   farmerId: { type: Schema.Types.ObjectId, ref: 'Farmer', required: true, index: true },
   submissionId: { type: String, required: true },
   name: { type: String, required: true, trim: true, maxlength: 120 },
+  sourceLanguage: { type: String, enum: ['en', 'kn', 'tcy'], required: true, default: 'en' },
   nameTranslations: {
     en: { type: String, trim: true, maxlength: 120 },
     kn: { type: String, trim: true, maxlength: 120 },
@@ -70,7 +71,19 @@ const produceSchema = new Schema({
   quantity: { type: Number, required: true, min: Number.MIN_VALUE, max: 1_000_000_000 },
   unit: { type: String, enum: ['kg', 'quintal', 'bunch', 'pieces'], required: true },
   pricePerUnit: { type: Number, min: Number.MIN_VALUE, max: 1_000_000_000, default: null },
-  photos: [{ storageKey: { type: String, required: true }, mimeType: { type: String, enum: ['image/jpeg', 'image/png', 'image/webp'], required: true }, size: { type: Number, required: true } }],
+  priceUnit: { type: String, enum: ['kg', 'quintal', 'bunch', 'pieces'], default: null },
+  photos: [{
+    // storageKey remains optional for local assets created before Cloudinary migration.
+    storageKey: { type: String },
+    publicId: { type: String },
+    assetId: { type: String },
+    resourceType: { type: String, enum: ['image'] },
+    format: { type: String, enum: ['jpeg', 'png', 'webp'] },
+    width: { type: Number },
+    height: { type: Number },
+    mimeType: { type: String, enum: ['image/jpeg', 'image/png', 'image/webp'], required: true },
+    size: { type: Number, required: true },
+  }],
   status: { type: String, enum: ['awaiting_price', 'priced_unpublished'], required: true, default: 'awaiting_price' },
 }, { timestamps: true, strict: 'throw' });
 produceSchema.index({ farmerId: 1, submissionId: 1 }, { unique: true });

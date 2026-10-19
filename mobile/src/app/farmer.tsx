@@ -1,6 +1,6 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { router, useLocalSearchParams } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Image } from 'expo-image';
 
 import {
@@ -23,6 +23,7 @@ export default function FarmerHomeScreen() {
   const [profile, setProfile] = useState<FarmerProfile | null>(null);
   const [profileState, setProfileState] = useState<ProfileState>('loading');
   const [retryCount, setRetryCount] = useState(0);
+  const produceRefreshKey = `${retryCount}:${params.produceAdded ?? ''}:${params.producePriceAdded ?? ''}`;
   const [produce, setProduce] = useState<FarmerProduce[]>([]);
   const [produceState, setProduceState] = useState<ProfileState>('loading');
   const [marketResults, setMarketResults] = useState<Record<string, FarmerMarketComparison | null>>({});
@@ -91,10 +92,11 @@ export default function FarmerHomeScreen() {
     };
   }, [retryCount]);
 
-  useEffect(() => {
+  useFocusEffect(useCallback(() => {
     let active = true;
     const controller = new AbortController();
-    getFarmerProduce(controller.signal)
+    setProduceState('loading');
+    getFarmerProduce(controller.signal, produceRefreshKey)
       .then((items) => { if (active) { setProduce(items); setProduceState('loaded'); } })
       .catch(async (error: unknown) => {
         if (!active || controller.signal.aborted) return;
@@ -106,7 +108,7 @@ export default function FarmerHomeScreen() {
         if (active) setProduceState('error');
       });
     return () => { active = false; controller.abort(); };
-  }, [retryCount, params.produceAdded, params.producePriceAdded]);
+  }, [produceRefreshKey]));
 
   const retryProfile = () => {
     setProfile(null);
@@ -159,7 +161,7 @@ export default function FarmerHomeScreen() {
           <View style={styles.produceInfo}>
             <Text style={styles.produceName}>{item.nameTranslations?.[language]?.trim() || item.name}</Text>
             <Text style={styles.produceQuantity}>{t('produce.availableQuantity').replace('{quantity}', String(item.quantity)).replace('{unit}', t(`produce.unit.${item.unit}` as Parameters<typeof t>[0]))}</Text>
-            {item.pricePerUnit != null ? <Text style={styles.producePrice}>{new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(item.pricePerUnit)} / {t(`produce.priceUnit.${item.unit}` as Parameters<typeof t>[0])}</Text> : <>
+            {item.pricePerUnit != null ? <Text style={styles.producePrice}>{new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(item.pricePerUnit)} / {t(`produce.priceUnit.${item.priceUnit ?? item.unit}` as Parameters<typeof t>[0])}</Text> : <>
               <Text style={styles.pricePending}>{t('produce.status.awaitingPrice')}</Text>
               <Pressable accessibilityRole="button" onPress={() => router.push({ pathname: '/farmer-add-price', params: { produceId: item.id } })} style={styles.addPriceButton}><Text style={styles.addPriceButtonText}>{t('produce.addPrice')}</Text></Pressable>
             </>}
