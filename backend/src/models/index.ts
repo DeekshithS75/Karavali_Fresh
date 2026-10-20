@@ -21,8 +21,9 @@ const farmerSchema = new Schema({
 const consumerSchema = new Schema({
   fullName: { type: String, required: true, trim: true, maxlength: 100 },
   preferredLanguage: { type: String, enum: ['en', 'kn', 'tcy'], default: 'en' },
-  email: { type: String, required: true, unique: true, index: true, lowercase: true, trim: true, maxlength: 254 },
-  passwordHash: { type: String, required: true, select: false },
+  phoneHash: { type: String, required: true, unique: true, index: true, select: false },
+  phoneCiphertext: { type: String, required: true, select: false },
+  phoneVerifiedAt: { type: Date, required: true },
   accountStatus: { type: String, enum: ['active'], required: true, default: 'active' },
 }, { timestamps: true, strict: 'throw' });
 
@@ -50,9 +51,11 @@ const otpChallengeSchema = new Schema({
   providerRequestId: { type: String, unique: true, sparse: true, index: true },
   callNumber: { type: String, maxlength: 80 },
   instruction: { type: String, maxlength: 500 },
-  purpose: { type: String, enum: ['farmer_login', 'farmer_registration'], required: true },
+  purpose: { type: String, enum: ['farmer_login', 'farmer_registration', 'consumer_login', 'consumer_registration'], required: true },
   farmerId: { type: Schema.Types.ObjectId, ref: 'Farmer' },
   registrationId: { type: Schema.Types.ObjectId, ref: 'PendingFarmerRegistration' },
+  consumerId: { type: Schema.Types.ObjectId, ref: 'Consumer' },
+  phoneCiphertext: { type: String, select: false },
   expiresAt: { type: Date, required: true, index: { expires: 0 } },
   consumedAt: { type: Date, default: null },
   cancelledAt: { type: Date, default: null },
@@ -132,10 +135,11 @@ const produceRequestSchema = new Schema({
   listingPriceUnit: { type: String, enum: ['kg', 'quintal', 'bunch', 'pieces'], required: true },
   requestedQuantity: { type: Number, required: true, min: Number.MIN_VALUE, max: 1_000_000_000 },
   requestKey: { type: String, maxlength: 80 },
+  callConsentAt: { type: Date },
   unit: { type: String, enum: ['kg', 'quintal', 'bunch', 'pieces'], required: true },
   status: { type: String, enum: ['pending', 'accepted', 'rejected', 'cancelled'], required: true, default: 'pending', index: true },
   decidedAt: { type: Date, default: null },
-  decisionReason: { type: String, enum: ['listing_deleted', 'listing_unavailable', 'insufficient_quantity'], default: null },
+  decisionReason: { type: String, enum: ['listing_deleted', 'listing_unavailable', 'insufficient_quantity', 'buyer_account_reset'], default: null },
 }, { timestamps: true, strict: 'throw' });
 produceRequestSchema.index({ buyerId: 1, createdAt: -1 });
 produceRequestSchema.index({ farmerId: 1, status: 1, createdAt: -1 });
@@ -146,7 +150,7 @@ const notificationSchema = new Schema({
   recipientRole: { type: String, enum: ['consumer', 'farmer'], required: true, index: true },
   recipientId: { type: Schema.Types.ObjectId, required: true, index: true },
   requestId: { type: Schema.Types.ObjectId, ref: 'ProduceRequest', required: true, index: true },
-  event: { type: String, enum: ['request_created', 'request_decided', 'request_cancelled'], required: true },
+  event: { type: String, enum: ['request_created', 'request_decided', 'request_cancelled', 'call_queued', 'call_initiated', 'call_failed', 'call_completed'], required: true },
   readAt: { type: Date, default: null },
 }, { timestamps: true, strict: 'throw' });
 notificationSchema.index({ recipientRole: 1, recipientId: 1, createdAt: -1 });
@@ -158,6 +162,22 @@ const pushTokenSchema = new Schema({
   disabledAt: { type: Date, default: null },
 }, { timestamps: true, strict: 'throw' });
 pushTokenSchema.index({ recipientRole: 1, recipientId: 1, disabledAt: 1 });
+
+const callAttemptSchema = new Schema({
+  requestId: { type: Schema.Types.ObjectId, ref: 'ProduceRequest', required: true },
+  activeRequestId: { type: Schema.Types.ObjectId, select: false },
+  attempt: { type: Number, required: true, min: 1 },
+  status: { type: String, enum: ['queued', 'initiated', 'failed', 'completed'], required: true, index: true },
+  provider: { type: String, enum: ['exotel'], default: 'exotel', required: true },
+  providerReference: { type: String, maxlength: 160 },
+  callbackTokenHash: { type: String, required: true, select: false, index: true },
+  failureCode: { type: String, maxlength: 80 },
+  startedAt: { type: Date, required: true },
+  completedAt: { type: Date },
+}, { timestamps: true, strict: 'throw' });
+callAttemptSchema.index({ requestId: 1, attempt: 1 }, { unique: true });
+callAttemptSchema.index({ activeRequestId: 1 }, { unique: true, sparse: true });
+callAttemptSchema.index({ providerReference: 1 }, { unique: true, sparse: true });
 
 const marketPriceObservationSchema = new Schema({
   recordKey: { type: String, required: true },
@@ -189,4 +209,5 @@ export const ProduceModel = mongoose.models.FarmerProduce ?? mongoose.model('Far
 export const ProduceRequestModel = mongoose.models.ProduceRequest ?? mongoose.model('ProduceRequest', produceRequestSchema);
 export const NotificationModel = mongoose.models.Notification ?? mongoose.model('Notification', notificationSchema);
 export const PushTokenModel = mongoose.models.PushToken ?? mongoose.model('PushToken', pushTokenSchema);
+export const CallAttemptModel = mongoose.models.CallAttempt ?? mongoose.model('CallAttempt', callAttemptSchema);
 export const MarketPriceObservationModel = mongoose.models.MarketPriceObservation ?? mongoose.model('MarketPriceObservation', marketPriceObservationSchema);

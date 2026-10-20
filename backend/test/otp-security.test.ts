@@ -10,9 +10,11 @@ const [{ ApiError, assertRegistrationAvailable, completePhoneVerification, findA
   import('../src/services/security.js'), import('../src/models/index.js'),
 ]);
 
+const selected = <T>(value: T) => Object.assign({ select() { return this; }, then(resolve: (input: T) => unknown, reject?: (reason: unknown) => unknown) { return Promise.resolve(value).then(resolve, reject); } }, value);
+
 test('phone challenge status remains pending until provider confirms it, and mismatched challenge references fail closed', async (context) => {
   const challenge = { _id: '507f1f77bcf86cd799439011', purpose: 'farmer_login', farmerId: 'farmer-id', providerRequestId: 'provider-1', status: 'pending', consumedAt: null, expiresAt: new Date(Date.now() + 60_000) };
-  context.mock.method(OtpChallengeModel, 'findById', async () => challenge as never);
+  context.mock.method(OtpChallengeModel, 'findById', () => selected(challenge) as never);
   context.mock.method(FarmerModel, 'findOne', () => ({ select: () => ({ lean: () => ({ exec: async () => ({ phone: '+919876543210' }) }) }) }) as never);
   context.mock.method(OtpChallengeModel, 'updateOne', async () => ({} as never));
   const pending = { status: async () => ({ requestId: 'provider-1', phone: '9876543210', reference: challenge._id, status: 'pending', verified: false, expiresAt: challenge.expiresAt }) };
@@ -23,11 +25,11 @@ test('phone challenge status remains pending until provider confirms it, and mis
 
 test('completion does not consume a challenge or issue a session while provider status is pending', async (context) => {
   const challenge = { _id: '507f1f77bcf86cd799439011', purpose: 'farmer_login', farmerId: 'farmer-id', providerRequestId: 'provider-1', status: 'pending', consumedAt: null, expiresAt: new Date(Date.now() + 60_000) };
-  context.mock.method(OtpChallengeModel, 'findById', async () => challenge as never);
+  context.mock.method(OtpChallengeModel, 'findById', () => selected(challenge) as never);
   context.mock.method(FarmerModel, 'findOne', () => ({ select: () => ({ lean: () => ({ exec: async () => ({ phone: '+919876543210' }) }) }) }) as never);
   context.mock.method(OtpChallengeModel, 'updateOne', async () => ({} as never));
   let consumed = false;
-  context.mock.method(OtpChallengeModel, 'findOneAndUpdate', async () => { consumed = true; return null as never; });
+  context.mock.method(OtpChallengeModel, 'findOneAndUpdate', () => { consumed = true; return selected(null) as never; });
   const provider = { status: async () => ({ requestId: 'provider-1', phone: '9876543210', reference: challenge._id, status: 'pending', verified: false, expiresAt: challenge.expiresAt }) };
   await assert.rejects(completePhoneVerification(challenge._id, provider as never), (error) => error instanceof ApiError && error.code === 'verification_pending');
   assert.equal(consumed, false);
@@ -35,11 +37,11 @@ test('completion does not consume a challenge or issue a session while provider 
 
 test('completion consumes a challenge only after NaCaller reports the matching request verified', async (context) => {
   const challenge = { _id: '507f1f77bcf86cd799439011', purpose: 'farmer_login', farmerId: 'farmer-id', providerRequestId: 'provider-1', status: 'pending', consumedAt: null, expiresAt: new Date(Date.now() + 60_000) };
-  context.mock.method(OtpChallengeModel, 'findById', async () => challenge as never);
+  context.mock.method(OtpChallengeModel, 'findById', () => selected(challenge) as never);
   context.mock.method(FarmerModel, 'findOne', () => ({ select: () => ({ lean: () => ({ exec: async () => ({ phone: '+919876543210' }) }) }) }) as never);
   context.mock.method(OtpChallengeModel, 'updateOne', async () => ({} as never));
   const consumed = { ...challenge, status: 'verified', consumedAt: new Date() };
-  context.mock.method(OtpChallengeModel, 'findOneAndUpdate', async () => consumed as never);
+  context.mock.method(OtpChallengeModel, 'findOneAndUpdate', () => selected(consumed) as never);
   const provider = { status: async () => ({ requestId: 'provider-1', phone: '9876543210', reference: challenge._id, status: 'verified', verified: true, expiresAt: challenge.expiresAt }) };
   assert.equal(await completePhoneVerification(challenge._id, provider as never), consumed);
 });

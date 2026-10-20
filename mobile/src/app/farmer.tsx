@@ -20,7 +20,7 @@ import { localizedProduceName } from '@/localization/produce-name';
 type ProfileState = 'loading' | 'loaded' | 'error' | 'missing';
 
 export default function FarmerHomeScreen() {
-  const { t, language } = useLanguage();
+  const { t, language, setLanguage } = useLanguage();
   const params = useLocalSearchParams<{ produceAdded?: string; producePriceAdded?: string }>();
   const [profile, setProfile] = useState<FarmerProfile | null>(null);
   const [profileState, setProfileState] = useState<ProfileState>('loading');
@@ -35,10 +35,27 @@ export default function FarmerHomeScreen() {
   const [deleteErrorId, setDeleteErrorId] = useState<string | null>(null);
   const [pushStatus, setPushStatus] = useState<Awaited<ReturnType<typeof registerAccountForPush>> | null>(null);
   const marketController = useRef<AbortController | null>(null);
+  const preferredLanguageLoaded = useRef(false);
+  const languageHydrated = useRef(false);
+  const lastSavedLanguage = useRef<'en' | 'kn' | 'tcy' | null>(null);
 
   useEffect(() => () => marketController.current?.abort(), []);
 
-  useEffect(() => { if (profileState === 'loaded') void setFarmerPreferredLanguage(language).catch(() => undefined); }, [profileState, language]);
+  useEffect(() => {
+    if (profileState !== 'loaded' || !preferredLanguageLoaded.current) return;
+    if (!languageHydrated.current) {
+      if (lastSavedLanguage.current !== language) return;
+      languageHydrated.current = true;
+      return;
+    }
+    if (lastSavedLanguage.current === language) return;
+    lastSavedLanguage.current = language;
+    void setFarmerPreferredLanguage(language).catch(() => undefined);
+  }, [profileState, language]);
+
+  useEffect(() => {
+    if (profileState === 'loaded' && languageHydrated.current) void registerAccountForPush('farmer', language).then(setPushStatus);
+  }, [profileState, language]);
 
   const compareMarketPrice = async (item: FarmerProduce) => {
     if (marketLoadingId) return;
@@ -77,8 +94,13 @@ export default function FarmerHomeScreen() {
       .then((value) => {
         if (!active) return;
         setProfile(value);
+        if (!preferredLanguageLoaded.current) {
+          const preferredLanguage = value.preferredLanguage ?? 'en';
+          preferredLanguageLoaded.current = true;
+          lastSavedLanguage.current = preferredLanguage;
+          setLanguage(preferredLanguage);
+        }
         setProfileState('loaded');
-        void registerAccountForPush('farmer', language).then((status) => { if (active) setPushStatus(status); });
       })
       .catch(async (error: unknown) => {
         if (!active || controller.signal.aborted) return;
@@ -98,7 +120,7 @@ export default function FarmerHomeScreen() {
       active = false;
       controller.abort();
     };
-  }, [retryCount, language]);
+  }, [retryCount, setLanguage]);
 
   useFocusEffect(useCallback(() => {
     let active = true;

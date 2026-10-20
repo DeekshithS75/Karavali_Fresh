@@ -197,7 +197,7 @@ export type FarmerProduce = {
 
 export type FarmerProduceRequest = {
   id: string; listingId: string; listingName: string; listingNameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; buyerName?: string; requestedQuantity: number; unit: string;
-  status: 'pending' | 'accepted' | 'rejected' | 'cancelled'; createdAt: string; decidedAt: string | null;
+  status: 'pending' | 'accepted' | 'rejected' | 'cancelled'; createdAt: string; decidedAt: string | null; callStatus?: 'queued' | 'initiated' | 'failed' | 'completed' | 'unavailable'; callConfirmed?: boolean;
 };
 
 export type FarmerNotification = { id: string; event: string; readAt: string | null; createdAt: string; request: FarmerProduceRequest | null };
@@ -366,6 +366,12 @@ export async function decideFarmerProduceRequest(requestId: string, decision: 'a
     method: 'PATCH', headers: { Authorization: 'Bearer ' + tokens.accessToken, 'Content-Type': 'application/json' },
     body: JSON.stringify({ decision }),
   });
+}
+
+export async function retryFarmerRequestCall(requestId: string) {
+  const tokens = await readTokens();
+  if (!tokens) throw new FarmerAuthError('unauthorized');
+  return request<{ status: string; confirmed: boolean }>(`/api/farmer/requests/${encodeURIComponent(requestId)}/call/retry`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.accessToken}` } });
 }
 
 export async function getFarmerNotifications(page = 1) {

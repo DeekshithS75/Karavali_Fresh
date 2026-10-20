@@ -29,6 +29,7 @@ export type ConsumerListing = {
   photoUrl: string | null;
   farmerName: string | null;
   marketComparison: ConsumerMarketComparison | null;
+  existingRequest?: { id: string; status: 'pending' | 'accepted' } | null;
 };
 
 export type ConsumerMarketComparison = {
@@ -50,7 +51,7 @@ export type ConsumerListingQuery = {
 export type ConsumerProduceRequest = {
   id: string; listingId: string; listingName: string; listingNameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; pricePerUnit: number; priceUnit: string;
   requestedQuantity: number; unit: string; status: 'pending' | 'accepted' | 'rejected' | 'cancelled';
-  createdAt: string; decidedAt: string | null; farmerContact?: { name: string; phone: string };
+  createdAt: string; decidedAt: string | null; callStatus?: 'queued' | 'initiated' | 'failed' | 'completed' | 'unavailable'; callConfirmed?: boolean;
 };
 
 export type ConsumerNotification = {
@@ -80,25 +81,24 @@ async function request<T>(path: string, init: RequestInit = {}) {
     if (body.error === 'session_signing_not_configured') throw new ConsumerAuthError('configurationIncomplete');
     if (body.error === 'rate_limit_exceeded') throw new ConsumerAuthError('rateLimited');
     if (body.error === 'validation_failed') throw new ConsumerAuthError('validationFailed');
-    if (typeof body.error === 'string' && body.error.startsWith('produce_request_')) throw new ConsumerAuthError('rejected', body.error);
+    if (typeof body.error === 'string') throw new ConsumerAuthError('rejected', body.error);
     throw new ConsumerAuthError('rejected');
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
-type ConsumerSessionReply = SessionTokens & { expiresAt: string; consumer: { id: string; fullName: string } };
-
-async function authenticate(path: '/api/consumer/auth/register' | '/api/consumer/auth/login', input: Record<string, string>) {
-  const result = await request<ConsumerSessionReply>(path, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
-  });
+type ConsumerSessionReply = SessionTokens & { expiresAt: string; consumer: { id: string; fullName: string; preferredLanguage?: 'en' | 'kn' | 'tcy' } };
+export type ConsumerChallenge = { challengeId: string; callNumber: string; instruction: string; expiresAt: string; status: 'pending' };
+export async function startConsumerPhoneVerification(phone: string, purpose: 'login' | 'registration', fullName?: string) {
+  return request<ConsumerChallenge>('/api/consumer/auth/phone-verification', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone, purpose, phoneVerificationConsent: true, ...(fullName ? { fullName } : {}) }) });
+}
+export async function completeConsumerPhoneVerification(challengeId: string, fullName?: string, preferredLanguage?: 'en' | 'kn' | 'tcy') {
+  const result = await request<ConsumerSessionReply>(`/api/consumer/auth/phone-verification/${encodeURIComponent(challengeId)}/complete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...(fullName ? { fullName } : {}), ...(preferredLanguage ? { preferredLanguage } : {}) }) });
   await storage.save(result);
   return result.consumer;
 }
-
-export const registerConsumer = (input: { fullName: string; email: string; password: string }) => authenticate('/api/consumer/auth/register', input);
-export const loginConsumer = (input: { email: string; password: string }) => authenticate('/api/consumer/auth/login', input);
+export const getConsumerPhoneVerificationStatus = (challengeId: string) => request<{ status: 'pending' | 'verified' | 'expired' | 'cancelled'; expiresAt: string }>(`/api/consumer/auth/phone-verification/${encodeURIComponent(challengeId)}/status`);
 
 async function validateSession(accessToken: string) {
   const result = await request<{ valid: boolean; role: string }>('/api/consumer/auth/session', { headers: { Authorization: `Bearer ${accessToken}` } });
@@ -112,7 +112,7 @@ export function getConsumerSessionState(): Promise<FarmerSessionState> {
 export async function getConsumerProfile() {
   const tokens = await storage.read();
   if (!tokens) throw new ConsumerAuthError('unauthorized');
-  return request<{ valid: true; role: 'consumer'; consumerId: string; fullName: string }>('/api/consumer/auth/session', { headers: { Authorization: `Bearer ${tokens.accessToken}` } });
+  return request<{ valid: true; role: 'consumer'; consumerId: string; fullName: string; preferredLanguage?: 'en' | 'kn' | 'tcy' }>('/api/consumer/auth/session', { headers: { Authorization: `Bearer ${tokens.accessToken}` } });
 }
 
 export async function setConsumerPreferredLanguage(language: 'en' | 'kn' | 'tcy') {
@@ -178,7 +178,7 @@ export async function requestConsumerProduce(produceId: string, requestedQuantit
   if (!tokens) throw new ConsumerAuthError('unauthorized');
   return request<{ request: ConsumerProduceRequest }>('/api/consumer/produce/' + encodeURIComponent(produceId) + '/requests', {
     method: 'POST', headers: { Authorization: 'Bearer ' + tokens.accessToken, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ requestedQuantity, requestKey }),
+    body: JSON.stringify({ requestedQuantity, requestKey, callConsent: true }),
   });
 }
 

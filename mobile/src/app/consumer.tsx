@@ -1,6 +1,6 @@
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
-import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Linking, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Image } from 'expo-image';
 import * as Location from 'expo-location';
 
@@ -8,14 +8,13 @@ import { LanguageSelector } from '@/components/language-selector';
 import { EmptyState, MarketColors, ScreenFrame, SectionHeading } from '@/components/marketplace-ui';
 import { useLanguage } from '@/localization/LanguageProvider';
 import { registerAccountForPush } from '@/features/push-notifications';
-import { localizedProduceName } from '@/localization/produce-name';
 import { ConsumerAuthError, getConsumerListings, getConsumerNotifications, getConsumerPhotoHeaders, getConsumerProfile, getConsumerRequests, getConsumerSessionState, logoutConsumer, markConsumerNotificationRead, setConsumerPreferredLanguage, type ConsumerListing, type ConsumerListingQuery, type ConsumerNotification, type ConsumerProduceRequest } from '@/features/consumer-auth/client';
 import { localizedProduceName } from '@/localization/produce-name';
 
 type Sort = NonNullable<ConsumerListingQuery['sort']>;
 
 export default function ConsumerHomeScreen() {
-  const { t, language } = useLanguage();
+  const { t, language, setLanguage } = useLanguage();
   const params = useLocalSearchParams<{ section?: string; requestId?: string }>();
   const [profileName, setProfileName] = useState('');
   const [pushStatus, setPushStatus] = useState<Awaited<ReturnType<typeof registerAccountForPush>> | null>(null);
@@ -46,6 +45,9 @@ export default function ConsumerHomeScreen() {
   const [unreadCount, setUnreadCount] = useState(0);
   const [requestLoadError, setRequestLoadError] = useState(false);
   const [activityLoading, setActivityLoading] = useState(true);
+  const preferredLanguageLoaded = useRef(false);
+  const languageHydrated = useRef(false);
+  const lastSavedLanguage = useRef<'en' | 'kn' | 'tcy' | null>(null);
 
   const restoreSession = useCallback(async (isActive: () => boolean = () => true) => {
     const state = await getConsumerSessionState();
@@ -56,16 +58,19 @@ export default function ConsumerHomeScreen() {
       const [profile, headers] = await Promise.all([getConsumerProfile(), getConsumerPhotoHeaders()]);
       if (!isActive()) return;
       setProfileName(profile.fullName);
+      const preferredLanguage = profile.preferredLanguage ?? 'en';
+      preferredLanguageLoaded.current = true;
+      lastSavedLanguage.current = preferredLanguage;
+      setLanguage(preferredLanguage);
       setPhotoHeaders(headers);
       setSessionError(false);
-        setSessionReady(true);
-        void registerAccountForPush('consumer').then((status) => { if (isActive()) setPushStatus(status); });
+      setSessionReady(true);
     } catch (error) {
       if (!isActive()) return;
       if (error instanceof ConsumerAuthError && error.code === 'unauthorized') router.replace('/auth/consumer/login');
       else setSessionError(true);
     }
-  }, []);
+  }, [setLanguage]);
 
   useEffect(() => {
     let active = true;
@@ -73,7 +78,21 @@ export default function ConsumerHomeScreen() {
     return () => { active = false; };
   }, [restoreSession]);
 
-  useEffect(() => { if (sessionReady) void setConsumerPreferredLanguage(language).catch(() => undefined); }, [sessionReady, language]);
+  useEffect(() => {
+    if (!sessionReady || !preferredLanguageLoaded.current) return;
+    if (!languageHydrated.current) {
+      if (lastSavedLanguage.current !== language) return;
+      languageHydrated.current = true;
+      return;
+    }
+    if (lastSavedLanguage.current === language) return;
+    lastSavedLanguage.current = language;
+    void setConsumerPreferredLanguage(language).catch(() => undefined);
+  }, [sessionReady, language]);
+
+  useEffect(() => {
+    if (sessionReady && languageHydrated.current) void registerAccountForPush('consumer', language).then((status) => setPushStatus(status));
+  }, [sessionReady, language]);
 
   useEffect(() => {
     if (!sessionReady) return;
@@ -158,10 +177,6 @@ export default function ConsumerHomeScreen() {
     catch { setRequestLoadError(true); }
   };
 
-  const callFarmer = (phone: string) => {
-    void Linking.openURL(`tel:${phone}`).catch(() => Alert.alert(t('consumer.callError')));
-  };
-
   const loadMoreNotifications = async () => {
     if (loadingMoreNotifications || !notificationsHasMore) return;
     setLoadingMoreNotifications(true);
@@ -221,6 +236,7 @@ export default function ConsumerHomeScreen() {
               <Text style={styles.price}>{t('consumer.askingPrice')}: {new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(item.pricePerUnit)} / {t(`produce.priceUnit.${item.priceUnit}` as never)}</Text>
               {item.marketComparison?.status === 'available' && item.marketComparison.items.some((quote) => quote.modalPrice !== null && !quote.stale) ? <><Text style={styles.marketPrice}>{t('consumer.marketPrice')}: {new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(item.marketComparison.items.find((quote) => quote.modalPrice !== null && !quote.stale)!.modalPrice!)} · {item.marketComparison.items.find((quote) => quote.modalPrice !== null && !quote.stale)!.sourceDate}</Text><Text style={styles.help}>{t('consumer.marketRegionalShort')}</Text></> : <Text style={styles.help}>{t('consumer.marketUnavailable')}</Text>}
               {item.farmerName ? <Text style={styles.locality}>{t('consumer.farmerName')}: {item.farmerName}</Text> : null}
+              {item.existingRequest ? <Text style={styles.requestSuccess}>{t('consumer.requestedLabel')} · {t(('consumer.requestStatus.' + item.existingRequest.status) as never)}</Text> : null}
               <Text style={styles.quantity}>{t('consumer.quantityAvailable').replace('{quantity}', String(item.quantity)).replace('{unit}', t(`produce.unit.${item.unit}` as never))}</Text>
               <Text style={styles.locality}>{t(item.distanceBand ? `consumer.distance.${item.distanceBand}` as never : 'consumer.locationNotShared')}</Text>
             </View>
@@ -237,7 +253,7 @@ export default function ConsumerHomeScreen() {
           <Text style={styles.quantity}>{t('consumer.requestedAmount').replace('{quantity}', String(item.requestedQuantity)).replace('{unit}', t(('produce.unit.' + item.unit) as never))}</Text>
           <Text style={styles.price}>{t(('consumer.requestStatus.' + item.status) as never)}</Text>
           <Text style={styles.quantity}>{t('consumer.priceAtRequest').replace('{price}', new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(item.pricePerUnit)).replace('{unit}', t(('produce.priceUnit.' + item.priceUnit) as never))}</Text>
-          {item.farmerContact ? <View style={styles.contactBox}><Text style={styles.productName}>{item.farmerContact.name}</Text><Pressable accessibilityRole="button" onPress={() => callFarmer(item.farmerContact!.phone)}><Text style={styles.secondaryText}>{t('consumer.callFarmer').replace('{phone}', item.farmerContact.phone)}</Text></Pressable><Text style={styles.help}>{t('consumer.contactArrangement')}</Text></View> : null}
+          {item.status === 'accepted' ? <Text style={styles.help}>{t(('consumer.callStatus.' + (item.callStatus ?? 'unavailable')) as never)}</Text> : null}
         </View>)}
       </View>}
     </View> : <View style={styles.section}>
@@ -246,7 +262,7 @@ export default function ConsumerHomeScreen() {
         {notifications.map((item) => <View key={item.id} style={styles.activityCard}>
           <Text style={styles.productName}>{t(('consumer.notification.' + item.event) as never)}</Text>
           {item.request ? <><Text style={styles.quantity}>{localizedProduceName(item.request.listingName, item.request.listingNameTranslations, language)} · {t(('consumer.requestStatus.' + item.request.status) as never)}</Text><Pressable accessibilityRole="button" onPress={() => { router.setParams({ section: 'requests', requestId: item.request!.id }); setSection('requests'); void refreshBuyerActivity(); }} style={styles.detailsButton}><Text style={styles.detailsText}>{t('consumer.viewRequest')}</Text></Pressable></> : null}
-          {item.request?.farmerContact ? <Pressable accessibilityRole="button" onPress={() => callFarmer(item.request!.farmerContact!.phone)}><Text style={styles.secondaryText}>{t('consumer.callFarmer').replace('{phone}', item.request.farmerContact.phone)}</Text></Pressable> : null}
+          {item.request?.status === 'accepted' ? <Text style={styles.help}>{t(('consumer.callStatus.' + (item.request.callStatus ?? 'unavailable')) as never)}</Text> : null}
           {!item.readAt ? <Pressable accessibilityRole="button" onPress={() => void markRead(item.id)} style={styles.secondary}><Text style={styles.secondaryText}>{t('consumer.markRead')}</Text></Pressable> : null}
         </View>)}
         {notificationsHasMore ? <Pressable accessibilityRole="button" disabled={loadingMoreNotifications} onPress={() => void loadMoreNotifications()} style={styles.secondary}><Text style={styles.secondaryText}>{t(loadingMoreNotifications ? 'consumer.loading' : 'consumer.loadMore')}</Text></Pressable> : null}

@@ -29,6 +29,11 @@ async function server(context: TestContext) {
     select() { return this; }, exec: async () => ({ _id: buyerId, fullName: 'Buyer', accountStatus: 'active' }),
   }) as never);
   context.mock.method(models.ConsumerModel, 'find', () => ({ select() { return this; }, lean() { return this; }, exec: async () => [{ _id: buyerId, fullName: 'Buyer' }] }) as never);
+  context.mock.method(models.ConsumerModel, 'findById', () => query(() => ({ preferredLanguage: 'en' })) as never);
+  context.mock.method(models.FarmerModel, 'findById', () => query(() => ({ preferredLanguage: 'en' })) as never);
+  context.mock.method(models.CallAttemptModel, 'findOne', () => query(() => null) as never);
+  context.mock.method(models.CallAttemptModel, 'create', async (records: Array<Record<string, any>>) => records.map((record) => ({ _id: new Types.ObjectId(), ...record })) as never);
+  context.mock.method(models.CallAttemptModel, 'updateOne', () => query(() => ({ modifiedCount: 1 })) as never);
   context.mock.method(models.SessionModel, 'findOne', async (query: { tokenHash: string }) => query.tokenHash === hmac(farmerToken)
     ? { farmerId, revokedAt: null, expiresAt: new Date(Date.now() + 60_000) } : null);
   context.mock.method(models.FarmerModel, 'findById', () => ({
@@ -39,6 +44,8 @@ async function server(context: TestContext) {
     listing: { _id: listingId, farmerId, name: 'Tomato', unit: 'kg', quantity: 5, requestVersion: 0, status: 'published', pricePerUnit: 20, priceUnit: 'kg', photos: [] as Array<Record<string, unknown>>, deleted: false },
     requests: [] as Array<Record<string, any>>,
     notifications: [] as Array<Record<string, any>>,
+    extraListings: new Set<string>(),
+    extraListingFarmers: new Map<string, Types.ObjectId>(),
   };
 
   context.mock.method(models.ProduceModel, 'findOne', (filter: Record<string, any>) => query(() => {
@@ -49,13 +56,13 @@ async function server(context: TestContext) {
     if (update.$inc?.requestVersion) {
       if (db.listing.deleted || db.listing.status !== 'published' || db.listing.quantity <= 0) return null;
       db.listing.requestVersion += update.$inc.requestVersion;
-      return db.listing;
+      return { ...db.listing, farmerId: db.extraListingFarmers.get(String(filter._id)) ?? db.listing.farmerId };
     }
     if (update.$set?.status) {
       db.listing.status = update.$set.status;
       return { status: db.listing.status };
     }
-    if (String(filter._id) !== String(listingId) || String(filter.farmerId) !== String(farmerId) || db.listing.status !== 'published' || db.listing.quantity < filter.quantity.$gte) return null;
+    if ((String(filter._id) !== String(listingId) && !db.extraListings.has(String(filter._id))) || String(filter.farmerId) !== String(farmerId) || db.listing.status !== 'published' || db.listing.quantity < filter.quantity.$gte) return null;
     db.listing.quantity += update.$inc.quantity;
     return { quantity: db.listing.quantity };
   }) as never);
@@ -71,13 +78,16 @@ async function server(context: TestContext) {
   context.mock.method(models.ProduceRequestModel, 'findOne', (filter: Record<string, any>) => query(() =>
     db.requests.find((item) => filter.requestKey
       ? String(item.buyerId) === String(filter.buyerId) && item.requestKey === filter.requestKey
-      : String(item._id) === String(filter._id) && String(item.farmerId) === String(filter.farmerId)) ?? null,
+      : String(item._id) === String(filter._id) && String(item.farmerId) === String(filter.farmerId) && (!filter.status || item.status === filter.status)) ?? null,
   ) as never);
-  context.mock.method(models.ProduceRequestModel, 'find', (filter: Record<string, any>) => query(() => db.requests.filter((item) =>
-    filter.buyerId ? String(item.buyerId) === String(filter.buyerId) :
-      filter.farmerId ? String(item.farmerId) === String(filter.farmerId) && (!filter.status || item.status === filter.status) :
-        filter._id?.$in ? filter._id.$in.some((id: Types.ObjectId) => String(id) === String(item._id)) : false,
-  )) as never);
+  context.mock.method(models.ProduceRequestModel, 'find', (filter: Record<string, any>) => query(() => db.requests.filter((item) => {
+    if (filter._id?.$in) return filter._id.$in.some((id: Types.ObjectId) => String(id) === String(item._id));
+    if (filter.buyerId && String(item.buyerId) !== String(filter.buyerId)) return false;
+    if (filter.farmerId && String(item.farmerId) !== String(filter.farmerId)) return false;
+    if (filter.status?.$in && !filter.status.$in.includes(item.status)) return false;
+    if (filter.status && !filter.status.$in && item.status !== filter.status) return false;
+    return Boolean(filter.buyerId || filter.farmerId);
+  })) as never);
   context.mock.method(models.ProduceRequestModel, 'updateOne', (filter: Record<string, any>, update: Record<string, any>) => query(() => {
     const record = db.requests.find((item) => String(item._id) === String(filter._id) && String(item.farmerId) === String(filter.farmerId) && item.status === filter.status);
     if (!record) return { matchedCount: 0, modifiedCount: 0 };
@@ -130,11 +140,11 @@ function query<T>(read: () => T) {
 
 test('buyer request validates positive quantity, stores pending request and notifies its farmer without reserving stock', async (context) => {
   const { call, db } = await server(context);
-  const invalid = await call('/api/consumer/produce/' + listingId + '/requests', 'buyer', { requestedQuantity: 0 });
+  const invalid = await call('/api/consumer/produce/' + listingId + '/requests', 'buyer', { requestedQuantity: 0, callConsent: true });
   assert.equal(invalid.status, 400);
-  const tooMuch = await call('/api/consumer/produce/' + listingId + '/requests', 'buyer', { requestedQuantity: 6 });
+  const tooMuch = await call('/api/consumer/produce/' + listingId + '/requests', 'buyer', { requestedQuantity: 6, callConsent: true });
   assert.equal(tooMuch.status, 409);
-  const requestBody = { requestedQuantity: 2.5, requestKey: '291ca65b-1db8-45a3-9452-560c798946d9' };
+  const requestBody = { requestedQuantity: 2.5, callConsent: true, requestKey: '291ca65b-1db8-45a3-9452-560c798946d9' };
   const response = await call('/api/consumer/produce/' + listingId + '/requests', 'buyer', requestBody);
   assert.equal(response.status, 201);
   assert.equal(db.listing.quantity, 5);
@@ -145,6 +155,28 @@ test('buyer request validates positive quantity, stores pending request and noti
   assert.equal(retry.status, 200);
   assert.equal(db.requests.length, 1);
   assert.equal(db.notifications.length, 1);
+});
+
+test('active farmer and vegetable requests block another listing request, but rejection permits a new request', async (context) => {
+  const { call, db } = await server(context);
+  const first = await call('/api/consumer/produce/' + listingId + '/requests', 'buyer', { requestedQuantity: 1, callConsent: true, requestKey: '391ca65b-1db8-45a3-9452-560c798946d9' });
+  assert.equal(first.status, 201);
+  const duplicateListingId = new Types.ObjectId();
+  db.extraListings.add(String(duplicateListingId));
+  const second = await call('/api/consumer/produce/' + duplicateListingId + '/requests', 'buyer', { requestedQuantity: 1, callConsent: true, requestKey: '491ca65b-1db8-45a3-9452-560c798946d9' });
+  assert.equal(second.status, 409);
+  assert.equal((await second.json() as { error: string }).error, 'produce_request_already_active');
+  const otherFarmerListingId = new Types.ObjectId();
+  const otherFarmerId = new Types.ObjectId();
+  db.extraListings.add(String(otherFarmerListingId));
+  db.extraListingFarmers.set(String(otherFarmerListingId), otherFarmerId);
+  const otherFarmer = await call('/api/consumer/produce/' + otherFarmerListingId + '/requests', 'buyer', { requestedQuantity: 1, callConsent: true, requestKey: '691ca65b-1db8-45a3-9452-560c798946d9' });
+  assert.equal(otherFarmer.status, 201);
+  const requestId = String(db.requests[0]!._id);
+  assert.equal((await call('/api/farmer/requests/' + requestId + '/decision', 'farmer', { decision: 'rejected' }, 'PATCH')).status, 200);
+  const afterRejection = await call('/api/consumer/produce/' + listingId + '/requests', 'buyer', { requestedQuantity: 1, callConsent: true, requestKey: '591ca65b-1db8-45a3-9452-560c798946d9' });
+  assert.equal(afterRejection.status, 201);
+  assert.equal(db.requests.length, 3);
 });
 
 test('accept/reject decisions are owner-scoped, deduct once, and zero stock unpublishes the listing', async (context) => {
@@ -169,7 +201,7 @@ test('accept/reject decisions are owner-scoped, deduct once, and zero stock unpu
   assert.equal(db.requests[1]!.status, 'cancelled');
 });
 
-test('concurrent acceptances do not oversell and buyer receives farmer contact only after acceptance', async (context) => {
+test('concurrent acceptances do not oversell and buyer request responses never expose farmer phone numbers', async (context) => {
   const { call, db } = await server(context);
   db.requests.push(
     { _id: new Types.ObjectId(), buyerId, listingId, farmerId, listingName: 'Tomato', listingPricePerUnit: 20, listingPriceUnit: 'kg', requestedQuantity: 4, unit: 'kg', status: 'pending' },
@@ -186,9 +218,12 @@ test('concurrent acceptances do not oversell and buyer receives farmer contact o
   assert.equal(stillPending.status, 'rejected');
   assert.equal(db.listing.quantity, 1);
   const buyerRequests = await call('/api/consumer/requests', 'buyer');
-  const buyerBody = await buyerRequests.json() as { items: Array<{ farmerContact?: { phone: string }; status: string }> };
-  assert.equal(buyerBody.items.some((item) => item.status === 'pending' && item.farmerContact), false);
-  assert.equal(buyerBody.items.some((item) => item.status === 'accepted' && item.farmerContact?.phone === farmer.phone), true);
+  const buyerBody = await buyerRequests.json() as { items: Array<Record<string, unknown>> };
+  assert.equal(buyerBody.items.some((item) => 'farmerContact' in item || 'phone' in item), false);
+  const buyerNotices = await call('/api/consumer/notifications', 'buyer');
+  assert.equal((await buyerNotices.text()).includes(farmer.phone), false);
+  const farmerNotices = await call('/api/farmer/notifications', 'farmer');
+  assert.equal((await farmerNotices.text()).includes('9876543210'), false);
   assert.equal(buyerBody.items.some((item) => JSON.stringify(item).includes('Private address')), false);
   assert.equal((await call('/api/consumer/requests', 'farmer')).status, 401);
   assert.equal((await call('/api/farmer/requests', 'buyer')).status, 401);
@@ -225,10 +260,10 @@ test('farmers see and decide only requests belonging to their own listings', asy
 test('zero-stock and unpublished listings reject new requests', async (context) => {
   const { call, db } = await server(context);
   db.listing.quantity = 0;
-  assert.equal((await call('/api/consumer/produce/' + listingId + '/requests', 'buyer', { requestedQuantity: 1 })).status, 409);
+  assert.equal((await call('/api/consumer/produce/' + listingId + '/requests', 'buyer', { requestedQuantity: 1, callConsent: true })).status, 409);
   db.listing.quantity = 2;
   db.listing.status = 'priced_unpublished';
-  assert.equal((await call('/api/consumer/produce/' + listingId + '/requests', 'buyer', { requestedQuantity: 1 })).status, 409);
+  assert.equal((await call('/api/consumer/produce/' + listingId + '/requests', 'buyer', { requestedQuantity: 1, callConsent: true })).status, 409);
 });
 
 test('insufficient stock rejects acceptance without changing stock and unavailable listings cancel pending requests', async (context) => {
@@ -246,7 +281,7 @@ test('insufficient stock rejects acceptance without changing stock and unavailab
   assert.equal(unpublished.status, 200);
   assert.equal(pending.status, 'cancelled');
   assert.equal(db.notifications.some((item) => item.recipientRole === 'consumer' && item.event === 'request_cancelled'), true);
-  assert.equal((await call('/api/consumer/produce/' + listingId + '/requests', 'buyer', { requestedQuantity: 1 })).status, 409);
+  assert.equal((await call('/api/consumer/produce/' + listingId + '/requests', 'buyer', { requestedQuantity: 1, callConsent: true })).status, 409);
 
   db.listing.status = 'published';
   const awaitingDeletion = { _id: new Types.ObjectId(), buyerId, listingId, farmerId, listingName: 'Tomato', requestedQuantity: 1, unit: 'kg', status: 'pending' };

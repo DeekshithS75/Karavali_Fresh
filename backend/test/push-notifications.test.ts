@@ -5,6 +5,20 @@ import mongoose from 'mongoose';
 const [{ PushTokenModel }, { sendAccountPush }] = await Promise.all([
   import('../src/models/index.js'), import('../src/services/push-notifications.js'),
 ]);
+const { notificationCopy } = await import('../src/services/notification-copy.js');
+
+test('notification copy uses farmer English or Kannada preference and falls back to English for Tulu', () => {
+  const english = notificationCopy('en', 'request_created', { buyerName: 'Ravi', vegetableName: 'Tomato', quantity: 5, unit: 'kg' });
+  assert.match(english.body, /Ravi wants 5 kg of Tomato/);
+  assert.match(english.body, /Accept or decline/);
+  const kannada = notificationCopy('kn', 'request_created', { buyerName: 'ರವಿ', vegetableName: 'Tomato', quantity: 5, unit: 'kg' });
+  assert.match(kannada.body, /ಟೊಮೇಟೊ/);
+  assert.match(kannada.body, /5 ಕೆಜಿ/);
+  assert.match(kannada.body, /ಒಪ್ಪಿಕೊಳ್ಳಿ ಅಥವಾ ನಿರಾಕರಿಸಿ/);
+  const tuluFallback = notificationCopy('tcy', 'request_created', { buyerName: 'Ravi', vegetableName: 'Tomato', quantity: 5, unit: 'kg' });
+  assert.match(tuluFallback.body, /Accept or decline/);
+  assert.match(notificationCopy('kn', 'request_decided', { decision: 'accepted' }).body, /ಒಪ್ಪಿದ್ದಾರೆ/);
+});
 
 function tokenQuery(tokens: Array<{ _id: string; token: string }>) {
   return { select() { return this; }, lean() { return this; }, exec: async () => tokens };
@@ -28,8 +42,9 @@ test('invalid Expo push tokens are disabled after the provider reports DeviceNot
     return new Response(JSON.stringify({ data: [{ status: 'error', details: { error: 'DeviceNotRegistered' } }] }), { status: 200 });
   });
   await sendAccountPush('consumer', new mongoose.Types.ObjectId(), {
-    title: 'Request update', body: 'Open app to view it.', url: '/consumer?section=requests', notificationId: 'notice', requestId: 'request',
+    title: 'Request update', body: 'Open app to view it.', url: '/consumer?section=requests', notificationId: 'notice', requestId: 'request', categoryId: 'produceRequest',
   });
   assert.deepEqual(disabledIds, ['expired-token']);
   assert.match(pushedBody, /"channelId":"requests"/);
+  assert.match(pushedBody, /"categoryId":"produceRequest"/);
 });

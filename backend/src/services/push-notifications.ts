@@ -16,7 +16,7 @@ export async function sendAccountPush(role: PushRole, accountId: unknown, input:
         headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'Accept-Encoding': 'gzip, deflate' },
         body: JSON.stringify(batch.map(({ token }) => ({
           to: token, title: input.title, body: input.body, sound: 'default', priority: 'high', channelId: 'requests',
-          data: { url: input.url, notificationId: input.notificationId, requestId: input.requestId },
+          data: { url: input.url, notificationId: input.notificationId, requestId: input.requestId, ...(input.categoryId ? { categoryId: input.categoryId } : {}) },
           ...(input.categoryId ? { categoryId: input.categoryId } : {}),
         }))),
         signal: AbortSignal.timeout(5_000),

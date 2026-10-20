@@ -2,7 +2,7 @@ import { config } from '../config.js';
 import { ProviderNotConfiguredError } from './errors.js';
 
 export type PhoneVerificationStatus = 'pending' | 'verified' | 'expired';
-export type PhoneVerificationPurpose = 'farmer_login' | 'farmer_registration';
+export type PhoneVerificationPurpose = 'farmer_login' | 'farmer_registration' | 'consumer_login' | 'consumer_registration';
 
 export type NaCallerStartResult = {
   requestId: string;

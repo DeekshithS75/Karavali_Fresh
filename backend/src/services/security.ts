@@ -1,7 +1,7 @@
 import { Types, type Collection } from 'mongoose';
 import { areSessionSecretsConfigured, config, isPhoneVerificationConfigured } from '../config.js';
-import { decryptSecretValue, hashPhone, hmac, randomToken } from '../crypto.js';
-import { FarmerModel, OtpChallengeModel, PendingRegistrationModel, RateLimitModel, SessionModel } from '../models/index.js';
+import { decryptSecretValue, encryptSecretValue, hashPhone, hmac, randomToken } from '../crypto.js';
+import { ConsumerModel, FarmerModel, OtpChallengeModel, PendingRegistrationModel, RateLimitModel, SessionModel } from '../models/index.js';
 import { getPhoneVerificationProvider, normalizeIndianPhone, type PhoneVerificationProvider, type PhoneVerificationPurpose } from '../providers/otp.js';
 import { ProviderNotConfiguredError } from '../providers/errors.js';
 
@@ -37,6 +37,24 @@ export async function enforceRateLimit(key: string, limit: number, windowMs: num
   }
 }
 
+export async function enforceStrictRateLimit(key: string, limit: number, windowMs: number) {
+  const now = new Date();
+  const start = new Date(now.getTime() - windowMs);
+  const collection = RateLimitModel.collection as unknown as Collection<{ _id: string; windowStartedAt: Date; count: number; expiresAt: Date }>;
+  const result = await collection.findOneAndUpdate(
+    { _id: key },
+    [{ $set: {
+      windowStartedAt: { $cond: [{ $gt: ['$windowStartedAt', start] }, '$windowStartedAt', now] },
+      count: { $cond: [{ $gt: ['$windowStartedAt', start] }, { $add: ['$count', 1] }, 1] },
+      expiresAt: new Date(now.getTime() + windowMs * 2),
+    } }],
+    { upsert: true, returnDocument: 'after' },
+  );
+  if (result && typeof result === 'object' && 'count' in result && Number(result.count) > limit) {
+    throw new ApiError(429, 'rate_limit_exceeded');
+  }
+}
+
 export type PhoneVerificationStart = {
   challengeId: string;
   callNumber: string;
@@ -53,7 +71,7 @@ export type PhoneVerificationSnapshot = {
 export async function startPhoneVerification(
   phone: string,
   purpose: PhoneVerificationPurpose,
-  ids: { farmerId?: Types.ObjectId; registrationId?: Types.ObjectId },
+  ids: { farmerId?: Types.ObjectId; registrationId?: Types.ObjectId; consumerId?: Types.ObjectId },
   provider: PhoneVerificationProvider = getPhoneVerificationProvider(),
 ): Promise<PhoneVerificationStart> {
   if (!isPhoneVerificationConfigured()) throw new ProviderNotConfiguredError('otp');
@@ -82,6 +100,7 @@ export async function startPhoneVerification(
 
   const challenge = await OtpChallengeModel.create({
     phoneHash: hashPhone(normalizedPhone), purpose, ...ids,
+    ...(purpose.startsWith('consumer_') ? { phoneCiphertext: encryptSecretValue(normalizedPhone) } : {}),
     expiresAt: new Date(now.getTime() + config.PHONE_VERIFICATION_TTL_SECONDS * 1000),
     consumedAt: null, cancelledAt: null, consentedAt: now, status: 'starting',
   });
@@ -111,7 +130,7 @@ export async function getPhoneVerificationStatus(
   provider: PhoneVerificationProvider = getPhoneVerificationProvider(),
 ): Promise<PhoneVerificationSnapshot> {
   if (!Types.ObjectId.isValid(id)) throw new ApiError(404, 'verification_challenge_not_found');
-  const challenge = await OtpChallengeModel.findById(id);
+  const challenge = await OtpChallengeModel.findById(id).select('+phoneCiphertext');
   if (!challenge) throw new ApiError(404, 'verification_challenge_not_found');
   if (challenge.status === 'cancelled') return { status: 'cancelled', expiresAt: challenge.expiresAt.toISOString() };
   if (challenge.status === 'expired' || challenge.status === 'failed') return { status: 'expired', expiresAt: challenge.expiresAt.toISOString() };
@@ -148,7 +167,7 @@ export async function completePhoneVerification(id: string, provider: PhoneVerif
   const challenge = await OtpChallengeModel.findOneAndUpdate(
     { _id: id, status: 'verified', consumedAt: null, expiresAt: { $gt: new Date() } },
     { $set: { consumedAt: new Date() } }, { new: true },
-  );
+  ).select('+phoneCiphertext consumerId purpose phoneHash');
   if (!challenge) throw new ApiError(409, 'verification_already_completed');
   return challenge;
 }
@@ -164,9 +183,15 @@ export async function cancelPhoneVerification(id: string) {
   return { status: 'cancelled' as const };
 }
 
-async function getChallengePhone(challenge: { purpose: string; registrationId?: Types.ObjectId | null; farmerId?: Types.ObjectId | null }) {
+async function getChallengePhone(challenge: { purpose: string; registrationId?: Types.ObjectId | null; farmerId?: Types.ObjectId | null; consumerId?: Types.ObjectId | null; phoneCiphertext?: string }) {
   let raw: string | undefined;
-  if (challenge.purpose === 'farmer_registration' && challenge.registrationId) {
+  if (challenge.purpose.startsWith('consumer_') && challenge.phoneCiphertext) {
+    raw = decryptSecretValue(challenge.phoneCiphertext);
+    if (challenge.purpose === 'consumer_login' && challenge.consumerId) {
+      const consumer = await ConsumerModel.exists({ _id: challenge.consumerId, phoneHash: hashPhone(raw), accountStatus: 'active' });
+      if (!consumer) raw = undefined;
+    }
+  } else if (challenge.purpose === 'farmer_registration' && challenge.registrationId) {
     const registration = await PendingRegistrationModel.findOne({
       _id: challenge.registrationId, status: 'document_verified', documentComparisonStatus: 'passed', expiresAt: { $gt: new Date() },
     }).lean().exec() as { payloadCiphertext: string } | null;

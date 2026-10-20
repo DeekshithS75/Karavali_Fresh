@@ -34,7 +34,7 @@ function mockProfileLookup(context: TestContext, profile: Record<string, unknown
     assert.equal(String(id), ownFarmerId, 'profile lookup must use the Farmer ID from the server session');
     return {
       select(fields: string) {
-        assert.equal(fields, 'fullName accountStatus phoneVerificationStatus documentComparisonStatus');
+        assert.equal(fields, 'fullName preferredLanguage accountStatus phoneVerificationStatus documentComparisonStatus');
         return { lean: () => ({ exec: async () => profile }) };
       },
     } as never;
@@ -49,7 +49,7 @@ test('a valid session retrieves only its own Farmer profile fields', async (cont
   const get = await withServer(context);
   const response = await get('/api/farmer/profile');
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { profile: { fullName: 'Fictional Farmer' } });
+  assert.deepEqual(await response.json(), { profile: { fullName: 'Fictional Farmer', preferredLanguage: 'en' } });
 });
 
 test('an unauthenticated profile request is rejected', async (context) => {
@@ -66,7 +66,7 @@ test('a client supplied Farmer ID cannot change which profile the session retrie
   const get = await withServer(context);
   const response = await get(`/api/farmer/profile?farmerId=${otherFarmerId}`);
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { profile: { fullName: 'Fictional Farmer' } });
+  assert.deepEqual(await response.json(), { profile: { fullName: 'Fictional Farmer', preferredLanguage: 'en' } });
 });
 
 test('a valid session whose Farmer record is missing receives a not found response', async (context) => {
@@ -87,7 +87,7 @@ test('profile response never contains Aadhaar numbers, fingerprints, or internal
   const response = await get('/api/farmer/profile');
   const body = await response.text();
   assert.equal(response.status, 200);
-  assert.deepEqual(JSON.parse(body), { profile: { fullName: 'Fictional Farmer' } });
+  assert.deepEqual(JSON.parse(body), { profile: { fullName: 'Fictional Farmer', preferredLanguage: 'en' } });
   for (const sensitive of ['000000000000', 'fictional-fingerprint', 'fictional raw OCR content', 'fictional-session-hash']) {
     assert.equal(body.includes(sensitive), false);
   }

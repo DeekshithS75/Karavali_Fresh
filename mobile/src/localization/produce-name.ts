@@ -3,7 +3,7 @@ import type { LanguageCode } from './types';
 const KANNADA_NAMES: Record<string, string> = {
   tomato: 'ಟೊಮೇಟೊ', tomatoes: 'ಟೊಮೇಟೊ', brinjal: 'ಬದನೆಕಾಯಿ', eggplant: 'ಬದನೆಕಾಯಿ',
   aubergine: 'ಬದನೆಕಾಯಿ', 'ladies finger': 'ಬೆಂಡೆಕಾಯಿ', 'lady finger': 'ಬೆಂಡೆಕಾಯಿ',
-  okra: 'ಬೆಂಡೆಕಾಯಿ', bhindi: 'ಬೆಂಡೆಕಾಯಿ', 'ridge gourd': 'ಹೀರೆಕಾಯಿ', 'ridgeguard tori': 'ಹೀರೆಕಾಯಿ',
+  okra: 'ಬೆಂಡೆಕಾಯಿ', bhindi: 'ಬೆಂಡೆಕಾಯಿ', 'ridge gourd': 'ಹೀರೆಕಾಯಿ', 'ridgeguard tori': 'ಹೀರೆಕಾಯಿ', ridgeguardtori: 'ಹೀರೆಕಾಯಿ',
   'green chilli': 'ಹಸಿಮೆಣಸಿನಕಾಯಿ', 'green chili': 'ಹಸಿಮೆಣಸಿನಕಾಯಿ', beans: 'ಬೀನ್ಸ್',
   'bottle gourd': 'ಸೊರೆಕಾಯಿ', lauki: 'ಸೊರೆಕಾಯಿ', 'bitter gourd': 'ಹಾಗಲಕಾಯಿ', cauliflower: 'ಹೂಕೋಸು',
   cabbage: 'ಎಲೆಕೋಸು', carrot: 'ಕ್ಯಾರೆಟ್', beetroot: 'ಬೀಟ್ರೂಟ್', capsicum: 'ದೊಣ್ಣೆ ಮೆಣಸಿನಕಾಯಿ',

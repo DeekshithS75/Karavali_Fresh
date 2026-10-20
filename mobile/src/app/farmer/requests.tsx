@@ -1,9 +1,9 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, Pressable, StyleSheet, Text, View } from 'react-native';
 import { FarmerDashboardGuard } from '@/components/farmer-auth-flow';
 import { EmptyState, MarketColors, ScreenFrame, SectionHeading } from '@/components/marketplace-ui';
-import { FarmerAuthError, decideFarmerProduceRequest, getFarmerNotifications, getFarmerRequests, markFarmerNotificationRead, type FarmerProduceRequest } from '@/features/farmer-auth/client';
+import { FarmerAuthError, decideFarmerProduceRequest, getFarmerNotifications, getFarmerRequests, markFarmerNotificationRead, retryFarmerRequestCall, type FarmerProduceRequest } from '@/features/farmer-auth/client';
 import { useLanguage } from '@/localization/LanguageProvider';
 import { localizedProduceName } from '@/localization/produce-name';
 
@@ -28,7 +28,11 @@ export default function FarmerRequestsScreen() {
     } finally { setLoading(false); }
   }, []);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void Promise.resolve().then(load);
+    const subscription = AppState.addEventListener('change', (state) => { if (state === 'active') void load(); });
+    return () => subscription.remove();
+  }, [load]);
 
   const decide = (item: FarmerProduceRequest, decision: 'accepted' | 'rejected') => {
     Alert.alert(t(decision === 'accepted' ? 'farmer.requests.acceptTitle' : 'farmer.requests.rejectTitle'), t('farmer.requests.confirm').replace('{name}', item.listingName), [
@@ -50,6 +54,7 @@ export default function FarmerRequestsScreen() {
         <Text style={styles.body}>{t('farmer.requests.quantity').replace('{quantity}', String(item.requestedQuantity)).replace('{unit}', t(('produce.unit.' + item.unit) as never))}</Text>
         <Text style={styles.body}>{new Date(item.createdAt).toLocaleString()}</Text>
         <Text style={styles.status}>{t(('farmer.requests.status.' + item.status) as never)}</Text>
+        {item.status === 'accepted' ? <><Text style={styles.body}>{t(('consumer.callStatus.' + (item.callStatus ?? 'unavailable')) as never)}</Text>{item.callStatus === 'failed' ? <Pressable accessibilityRole="button" disabled={Boolean(busyId)} onPress={() => { setBusyId(item.id); void retryFarmerRequestCall(item.id).then(load).catch(() => setError(true)).finally(() => setBusyId(null)); }} style={styles.button}><Text style={styles.buttonText}>{t('farmer.requests.retryCall')}</Text></Pressable> : null}</> : null}
         {item.status === 'pending' ? <View style={styles.actions}>
           <Pressable accessibilityRole="button" disabled={Boolean(busyId)} onPress={() => decide(item, 'accepted')} style={styles.button}><Text style={styles.buttonText}>{busyId === item.id ? t('farmer.requests.working') : t('farmer.requests.accept')}</Text></Pressable>
           <Pressable accessibilityRole="button" disabled={Boolean(busyId)} onPress={() => decide(item, 'rejected')} style={styles.reject}><Text style={styles.rejectText}>{t('farmer.requests.reject')}</Text></Pressable>

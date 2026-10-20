@@ -5,6 +5,9 @@ import mongoose, { Types } from 'mongoose';
 
 process.env.NODE_ENV = 'development';
 process.env.TOKEN_HMAC_SECRET = 'consumer-test-token-secret'.padEnd(64, 'x');
+process.env.PHONE_HASH_SECRET = 'consumer-test-phone-secret'.padEnd(64, 'x');
+process.env.AADHAAR_ENCRYPTION_KEY_BASE64 = Buffer.alloc(32, 9).toString('base64');
+process.env.NACALLER_KEY = 'consumer-test-nacaller-provider-key';
 process.env.DATA_GOV_IN_API_KEY = '';
 
 const [{ default: app }, models, { hmac }, { setProduceCloudinaryClientForTests }] = await Promise.all([
@@ -25,30 +28,6 @@ async function withServer(context: TestContext) {
   });
 }
 
-function mockConsumerStore(context: TestContext) {
-  const consumers: Array<{ _id: Types.ObjectId; fullName: string; email: string; passwordHash: string; accountStatus: string }> = [];
-  const sessions: Array<{ _id: Types.ObjectId; consumerId: Types.ObjectId; tokenHash: string; expiresAt: Date; revokedAt: Date | null; save: () => Promise<void> }> = [];
-  context.mock.method(models.ConsumerModel, 'exists', async (query: { email: string }) => consumers.some((consumer) => consumer.email === query.email));
-  context.mock.method(models.ConsumerModel, 'create', async (data: { fullName: string; email: string; passwordHash: string }) => {
-    const consumer = { _id: new Types.ObjectId(), ...data, accountStatus: 'active' };
-    consumers.push(consumer);
-    return consumer as never;
-  });
-  context.mock.method(models.ConsumerModel, 'findOne', (query: { email?: string; _id?: Types.ObjectId }) => ({
-    select() { return this; },
-    async exec() { return consumers.find((consumer) => query.email ? consumer.email === query.email : String(consumer._id) === String(query._id)) ?? null; },
-  }) as never);
-  context.mock.method(models.ConsumerSessionModel, 'create', async (data: { consumerId: Types.ObjectId; tokenHash: string; expiresAt: Date; revokedAt: null }) => {
-    const session = { _id: new Types.ObjectId(), ...data, save: async () => undefined };
-    sessions.push(session);
-    return session as never;
-  });
-  context.mock.method(models.ConsumerSessionModel, 'findOne', async (query: { tokenHash: string; revokedAt: null }) => {
-    return sessions.find((session) => session.tokenHash === query.tokenHash && !session.revokedAt && session.expiresAt > new Date()) ?? null;
-  });
-  return { consumers, sessions };
-}
-
 function mockAuthenticatedConsumer(context: TestContext, token: string) {
   const consumerId = new Types.ObjectId();
   context.mock.method(models.ConsumerSessionModel, 'findOne', async (query: { tokenHash: string }) => query.tokenHash === hmac(token)
@@ -56,50 +35,66 @@ function mockAuthenticatedConsumer(context: TestContext, token: string) {
     : null);
   context.mock.method(models.ConsumerModel, 'findOne', () => ({ select() { return this; }, exec: async () => ({ _id: consumerId, fullName: 'Test Consumer', email: 'private@example.com', accountStatus: 'active' }) }) as never);
   context.mock.method(models.FarmerModel, 'find', () => ({ select() { return this; }, lean() { return this; }, exec: async () => [] }) as never);
+  context.mock.method(models.ProduceRequestModel, 'find', () => ({ sort() { return this; }, session() { return this; }, lean() { return this; }, exec: async () => [] }) as never);
   return consumerId;
 }
 
-test('consumer register, login, session validation, logout, and role isolation use separate server sessions', async (context) => {
-  const { consumers, sessions } = mockConsumerStore(context);
-  const pushedTokens: string[] = [];
-  context.mock.method(models.PushTokenModel, 'updateOne', (filter: { token: string }) => ({ exec: async () => { pushedTokens.push(filter.token); return { matchedCount: 1, modifiedCount: 1 }; } }) as never);
+test('Consumer email and password authentication is removed and phone verification requires explicit consent', async (context) => {
   const post = await withServer(context);
-  const registration = await post('/api/consumer/auth/register', undefined, { fullName: 'Test Consumer', email: '  TEST@example.com ', password: 'a-long-test-password' });
-  assert.equal(registration.status, 201);
-  const registered = await registration.json() as { accessToken: string; consumer: { fullName: string; email?: string } };
-  assert.equal(registered.consumer.fullName, 'Test Consumer');
-  assert.equal('email' in registered.consumer, false);
-  assert.match(consumers[0]!.passwordHash, /^scrypt\$/);
-  assert.notEqual(consumers[0]!.passwordHash, 'a-long-test-password');
-  assert.equal(sessions.length, 1);
+  const oldRegister = await post('/api/consumer/auth/register', undefined, { fullName: 'Test Consumer', email: 'buyer@example.com', password: 'long-password-123' });
+  assert.equal(oldRegister.status, 404);
+  const missingConsent = await post('/api/consumer/auth/phone-verification', undefined, { fullName: 'Test Consumer', phone: '+919876543210', purpose: 'registration', phoneVerificationConsent: false });
+  assert.equal(missingConsent.status, 400);
+  assert.deepEqual(await missingConsent.json(), { error: 'validation_failed', fields: [{ field: 'phoneVerificationConsent', message: 'Invalid literal value, expected true' }] });
+});
 
-  const badLogin = await post('/api/consumer/auth/login', undefined, { email: 'test@example.com', password: 'incorrect-password' });
-  assert.equal(badLogin.status, 401);
-  const duplicate = await post('/api/consumer/auth/register', undefined, { fullName: 'Test Consumer', email: 'test@example.com', password: 'another-long-password' });
+test('a Consumer registration creates no account while pending and creates a session only after matching NaCaller verification', async (context) => {
+  const post = await withServer(context);
+  let challenge: Record<string, unknown> | null = null;
+  let providerStatus = 'pending';
+  let createdConsumers = 0;
+  let registeredPhoneExists = false;
+  context.mock.method(models.RateLimitModel.collection, 'findOneAndUpdate', async () => ({ count: 1 }) as never);
+  const query = (read: () => unknown) => ({ sort() { return this; }, select() { return this; }, lean() { return this; }, exec: async () => read() });
+  context.mock.method(models.ConsumerModel, 'findOne', () => query(() => registeredPhoneExists ? { _id: new Types.ObjectId() } : null) as never);
+  context.mock.method(models.ConsumerModel, 'exists', async () => null as never);
+  context.mock.method(models.ConsumerModel, 'create', async (record: Record<string, unknown>) => { createdConsumers += 1; return { _id: new Types.ObjectId(), preferredLanguage: 'en', ...record }; });
+  context.mock.method(models.ConsumerSessionModel, 'create', async () => ({} as never));
+  context.mock.method(models.OtpChallengeModel, 'findOne', () => query(() => challenge) as never);
+  context.mock.method(models.OtpChallengeModel, 'findById', () => Object.assign({ select() { return this; }, then(resolve: (value: unknown) => unknown) { return Promise.resolve(challenge).then(resolve); } }, challenge) as never);
+  context.mock.method(models.OtpChallengeModel, 'create', async (record: Record<string, unknown>) => { challenge = { _id: new Types.ObjectId(), ...record }; return challenge as never; });
+  context.mock.method(models.OtpChallengeModel, 'findOneAndUpdate', (_filter: unknown, update: { $set?: Record<string, unknown> }) => { Object.assign(challenge!, update.$set); return Object.assign({ select() { return this; }, then(resolve: (value: unknown) => unknown) { return Promise.resolve(challenge).then(resolve); } }, challenge) as never; });
+  context.mock.method(models.OtpChallengeModel, 'updateOne', async (_filter: unknown, update: { $set: Record<string, unknown> }) => { Object.assign(challenge!, update.$set); return {} as never; });
+  const realFetch = globalThis.fetch.bind(globalThis);
+  context.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+    if (!String(input).startsWith('https://api.nacaller.com/')) return realFetch(input, init);
+    return String(input).endsWith('/status/provider-consumer-42')
+      ? new Response(JSON.stringify({ requestId: 'provider-consumer-42', phone: '9876543210', reference: String(challenge?._id), status: providerStatus, verified: providerStatus === 'verified', expiresAt: new Date(Date.now() + 60_000).toISOString() }), { status: 200 })
+      : new Response(JSON.stringify({ requestId: 'provider-consumer-42', phone: '9876543210', callNumber: '+18005550123', instruction: 'Call this number to verify', status: 'pending', expiresAt: new Date(Date.now() + 60_000).toISOString() }), { status: 200 });
+  });
+
+  const start = await post('/api/consumer/auth/phone-verification', undefined, { fullName: 'Test Buyer', phone: '98765 43210', purpose: 'registration', phoneVerificationConsent: true });
+  if (start.status !== 202) assert.fail(`verification start returned ${start.status}: ${JSON.stringify(await start.json())}`);
+  const started = await start.json() as { challengeId: string; callNumber: string; instruction: string };
+  assert.equal(started.callNumber, '+18005550123');
+  assert.equal(started.instruction, 'Call this number to verify');
+  assert.equal(createdConsumers, 0);
+
+  const pending = await post(`/api/consumer/auth/phone-verification/${started.challengeId}/complete`, undefined, { fullName: 'Test Buyer' });
+  assert.equal(pending.status, 409);
+  assert.equal(createdConsumers, 0);
+  providerStatus = 'verified';
+  const complete = await post(`/api/consumer/auth/phone-verification/${started.challengeId}/complete`, undefined, { fullName: 'Test Buyer' });
+  if (complete.status !== 201) assert.fail(`verification completion returned ${complete.status}: ${JSON.stringify(await complete.json())}`);
+  assert.equal(createdConsumers, 1);
+  const session = await complete.json() as { accessToken: string; consumer: { fullName: string } };
+  assert.equal(session.consumer.fullName, 'Test Buyer');
+  assert.equal('phone' in session.consumer, false);
+  assert.ok(session.accessToken);
+  registeredPhoneExists = true;
+  const duplicate = await post('/api/consumer/auth/phone-verification', undefined, { fullName: 'Another Buyer', phone: '+919876543210', purpose: 'registration', phoneVerificationConsent: true });
   assert.equal(duplicate.status, 409);
-
-  const login = await post('/api/consumer/auth/login', undefined, { email: 'TEST@example.com', password: 'a-long-test-password' });
-  assert.equal(login.status, 200);
-  const loggedIn = await login.json() as { accessToken: string };
-  const session = await post('/api/consumer/auth/session', loggedIn.accessToken);
-  assert.equal(session.status, 200);
-  assert.equal((await session.json() as { role: string }).role, 'consumer');
-  const registeredPush = await post('/api/consumer/push-tokens', loggedIn.accessToken, { token: 'ExpoPushToken[valid-consumer-token]' });
-  assert.equal(registeredPush.status, 204);
-  assert.equal(pushedTokens[0], 'ExpoPushToken[valid-consumer-token]');
-
-  context.mock.method(models.SessionModel, 'findOne', async () => null);
-  const farmerOnly = await post('/api/farmer/auth/session', loggedIn.accessToken);
-  assert.equal(farmerOnly.status, 401, 'a Consumer token cannot enter Farmer-only routes');
-  const consumerOnlyWithFarmerToken = await post('/api/consumer/auth/session', 'farmer-test-token-not-in-consumer-store-1234567890');
-  assert.equal(consumerOnlyWithFarmerToken.status, 401, 'a Farmer token cannot enter Consumer-only routes');
-  const farmerTokenListings = await post('/api/consumer/produce', 'farmer-test-token-not-in-consumer-store-1234567890');
-  assert.equal(farmerTokenListings.status, 401, 'a Farmer token cannot browse Consumer listings');
-
-  const logout = await post('/api/consumer/auth/logout', loggedIn.accessToken, {}, 'POST');
-  assert.equal(logout.status, 204);
-  const afterLogout = await post('/api/consumer/auth/session', loggedIn.accessToken);
-  assert.equal(afterLogout.status, 401);
+  assert.equal(createdConsumers, 1);
 });
 
 test('consumer listings are published-only, searchable, paginated, and omit private data', async (context) => {
@@ -214,6 +209,7 @@ test('consumer product detail serializes selling price and photos without exposi
     },
   }) as never);
   context.mock.method(models.FarmerModel, 'findById', () => ({ select() { return this; }, lean() { return this; }, exec: async () => ({ fullName: 'Farmer Display Name', phone: '+919999999999', address: 'Private address', aadhaarHash: 'private-hash' }) }) as never);
+  context.mock.method(models.ProduceRequestModel, 'findOne', () => ({ sort() { return this; }, lean() { return this; }, exec: async () => null }) as never);
   const get = await withServer(context);
   const response = await get(`/api/consumer/produce/${produceId}`, token);
   assert.equal(response.status, 200);

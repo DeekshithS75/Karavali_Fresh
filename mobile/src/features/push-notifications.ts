@@ -13,7 +13,7 @@ export async function registerAccountForPush(role: 'farmer' | 'consumer', langua
     if (Platform.OS === 'android') await Notifications.setNotificationChannelAsync('requests', {
       name: 'Produce requests', importance: AndroidImportance.HIGH, vibrationPattern: [0, 250, 250, 250],
     });
-    if (role === 'farmer') await Notifications.setNotificationCategoryAsync('produce-request', [
+    if (role === 'farmer') await Notifications.setNotificationCategoryAsync('produceRequest', [
       { identifier: 'accept', buttonTitle: language === 'kn' ? 'ಒಪ್ಪಿಕೊಳ್ಳಿ' : 'Accept', options: { opensAppToForeground: true } },
       { identifier: 'decline', buttonTitle: language === 'kn' ? 'ನಿರಾಕರಿಸಿ' : 'Decline', options: { opensAppToForeground: true, isDestructive: true } },
     ]);
