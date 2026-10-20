@@ -40,7 +40,7 @@ Create a Render **Web Service** from this repository with these settings:
 | Start Command | `npm start` |
 | Health Check Path | `/health` |
 
-`npm run build` compiles `src/index.ts` to `dist/index.js`, which is the target of the existing `start` script. The server uses Render's `PORT` environment variable (with `4000` as the local fallback) and binds to `0.0.0.0`. Startup validates production secrets, connects to MongoDB, and creates indexes before listening. `/health` returns `200` only while Mongoose is connected and `503` otherwise. Render should set `NODE_ENV=production`; do not set `PORT` manually.
+`npm run build` compiles `src/index.ts` to `dist/index.js`, which is the target of the existing `start` script. The server uses Render's `PORT` environment variable (with `4000` as the local fallback) and binds to `0.0.0.0`. Startup validates production secrets, connects to MongoDB, and creates indexes before listening. `/health` returns `200` only while Mongoose is connected and `503` otherwise. Render should set `NODE_ENV=production` and `NODE_VERSION=24.22.0` (Node 24 LTS); do not set `PORT` manually.
 
 Set these Render environment variables for the core production service:
 
