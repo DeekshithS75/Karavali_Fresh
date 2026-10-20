@@ -90,13 +90,13 @@ export async function startPhoneVerification(
     };
   }
   if (active) {
-    throw new ApiError(429, 'verification_resend_too_soon');
+    throw new ApiError(409, 'verification_start_in_progress');
   }
   const latest = await OtpChallengeModel.findOne({ phoneHash: hashPhone(normalizedPhone) }).sort({ createdAt: -1 }).select('createdAt status').lean().exec() as { createdAt: Date; status: string } | null;
-  if (latest && ['starting', 'pending', 'verified'].includes(latest.status) && now.getTime() - latest.createdAt.getTime() < config.PHONE_VERIFICATION_RESEND_SECONDS * 1000) {
+  if (purpose.startsWith('consumer_') && latest && ['starting', 'pending', 'verified'].includes(latest.status) && now.getTime() - latest.createdAt.getTime() < config.PHONE_VERIFICATION_RESEND_SECONDS * 1000) {
     throw new ApiError(429, 'verification_resend_too_soon');
   }
-  await enforceRateLimit(`phone-verify:${hashPhone(normalizedPhone)}`, 3, 15 * 60_000);
+  if (purpose.startsWith('consumer_')) await enforceRateLimit(`phone-verify:${hashPhone(normalizedPhone)}`, 3, 15 * 60_000);
 
   const challenge = await OtpChallengeModel.create({
     phoneHash: hashPhone(normalizedPhone), purpose, ...ids,

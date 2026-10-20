@@ -429,7 +429,6 @@ app.post('/api/farmer/registrations/:id/phone-verification', async (request, res
     if (!registration.phoneVerificationConsentedAt) throw new ApiError(409, 'phone_verification_consent_required');
     if (!areSessionSecretsConfigured()) throw new ApiError(503, 'session_signing_not_configured');
     if (!isPhoneVerificationConfigured()) throw new ProviderNotConfiguredError('otp');
-    await enforceRateLimit(`registration-phone-verification-ip:${hmac(request.ip ?? 'unknown')}`, 10, 60 * 60_000);
     const data = JSON.parse(decryptSecretValue(registration.payloadCiphertext)) as PendingFarmerDetails;
     const challenge = await startPhoneVerification(data.phone, 'farmer_registration', { registrationId: registration._id });
     return response.status(202).json(challenge);
@@ -441,7 +440,6 @@ app.post('/api/farmer/auth/phone-verification', async (request, response) => {
     if (!isPhoneVerificationConfigured()) throw new ProviderNotConfiguredError('otp');
     if (!areSessionSecretsConfigured()) throw new ApiError(503, 'session_signing_not_configured');
     const { phone } = phoneVerificationBody.parse(request.body);
-    await enforceRateLimit(`phone-verification-ip:${hmac(request.ip ?? 'unknown')}`, 20, 15 * 60_000);
     const farmer = await FarmerModel.findOne({ phone: { $in: [phone, phone.slice(3)] }, accountStatus: 'active', phoneVerificationStatus: 'verified', documentComparisonStatus: 'passed' });
     if (!farmer) throw new ApiError(404, 'farmer_not_found');
     const challenge = await startPhoneVerification(phone, 'farmer_login', { farmerId: farmer._id });

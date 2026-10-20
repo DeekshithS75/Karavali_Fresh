@@ -57,6 +57,7 @@ function farmerAuthErrorText(error: unknown, page: Page): TranslationKey {
   if (error.code === 'documentUnreadable') return 'farmerAuth.documentUnreadable';
   if (error.code === 'verificationNotConfigured') return 'farmerAuth.phoneVerificationProviderMissing';
   if (error.code === 'verificationProviderFailure') return 'farmerAuth.phoneVerificationProviderFailure';
+  if (error.code === 'verificationInProgress') return 'farmerAuth.verificationInProgress';
   if (error.code === 'rateLimited') return 'farmerAuth.rateLimited';
   if (error.code === 'verificationExpired') return 'farmerAuth.phoneVerificationExpired';
   if (error.code === 'ocrUnavailable') return 'farmerAuth.providerMissing';
@@ -85,6 +86,7 @@ export function FarmerAuthFlow({ page }: Props) {
   const [documentType, setDocumentType] = useState('image/jpeg');
   const documentUriRef = useRef<string | null>(null);
   const finishingVerificationRef = useRef(false);
+  const startingPhoneVerificationRef = useRef(false);
 
   useEffect(() => { documentUriRef.current = documentUri; }, [documentUri]);
   useEffect(() => () => {
@@ -232,6 +234,7 @@ export function FarmerAuthFlow({ page }: Props) {
   };
 
   const startLoginVerification = async () => {
+    if (startingPhoneVerificationRef.current) return;
     const phone = values.phone.replace(/\D/g, '');
     if (!/^\d{10}$/.test(phone)) {
       setErrors({ phone: 'farmerAuth.error.phone' });
@@ -241,6 +244,7 @@ export function FarmerAuthFlow({ page }: Props) {
       setErrors({ phoneVerificationConsent: 'farmerAuth.error.phoneVerificationConsent' });
       return;
     }
+    startingPhoneVerificationRef.current = true;
     setBusy(true);
     setNotice(null);
     try {
@@ -252,7 +256,10 @@ export function FarmerAuthFlow({ page }: Props) {
       router.push('/auth/farmer/otp' as never);
     } catch (error) {
       setNotice(farmerAuthErrorText(error, page));
-    } finally { setBusy(false); }
+    } finally {
+      startingPhoneVerificationRef.current = false;
+      setBusy(false);
+    }
   };
 
   const continueFromEntry = async () => {
@@ -377,7 +384,7 @@ export function FarmerAuthFlow({ page }: Props) {
     const challenge = farmerAuthRuntime.getPhoneVerification();
     if (!challenge) { setNotice('farmerAuth.backendUnavailable'); return undefined; }
     const poll = async () => {
-      if (!active || verificationStatus === 'expired' || verificationStatus === 'cancelled') return;
+      if (!active || verificationStatus === 'verified' || verificationStatus === 'expired' || verificationStatus === 'cancelled') return;
       if (AppState.currentState !== 'active') {
         timer = setTimeout(() => { void poll(); }, 2500);
         return;

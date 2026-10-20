@@ -9,7 +9,7 @@ import { getApiBase } from '../api-base';
 
 const API_BASE = getApiBase();
 
-type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'exists' | 'documentRequired' | 'invalidDocument' | 'documentMismatch' | 'documentUnreadable' | 'documentFieldsMissing' | 'verificationNotConfigured' | 'verificationProviderFailure' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound' | 'profileNotFound' | 'verificationExpired' | 'configurationIncomplete' | 'privacyNoticeOutdated' | 'validationFailed' | 'produceRequestRejected' | 'producePhotoCount' | 'producePhotoTooLarge' | 'produceImageInvalid' | 'produceStorageUnavailable' | 'produceStorageUploadFailed' | 'producePriceInvalid' | 'produceNotFound' | 'produceDeleteCleanupFailed' | 'producePriceAlreadySet' | 'marketPriceUnavailable' | 'marketPriceNotConfigured' | 'marketPriceInvalidKey' | 'marketPriceRateLimited' | 'marketCommodityUnrecognized' | 'marketOriginInvalid';
+type ApiErrorCode = 'unavailable' | 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'exists' | 'documentRequired' | 'invalidDocument' | 'documentMismatch' | 'documentUnreadable' | 'documentFieldsMissing' | 'verificationNotConfigured' | 'verificationProviderFailure' | 'verificationInProgress' | 'rateLimited' | 'ocrUnavailable' | 'farmerNotFound' | 'profileNotFound' | 'verificationExpired' | 'configurationIncomplete' | 'privacyNoticeOutdated' | 'validationFailed' | 'produceRequestRejected' | 'producePhotoCount' | 'producePhotoTooLarge' | 'produceImageInvalid' | 'produceStorageUnavailable' | 'produceStorageUploadFailed' | 'producePriceInvalid' | 'produceNotFound' | 'produceDeleteCleanupFailed' | 'producePriceAlreadySet' | 'marketPriceUnavailable' | 'marketPriceNotConfigured' | 'marketPriceInvalidKey' | 'marketPriceRateLimited' | 'marketCommodityUnrecognized' | 'marketOriginInvalid';
 export type FarmerDocumentField = 'name' | 'age' | 'gender' | 'aadhaar' | 'address' | 'date_of_birth';
 
 const farmerDocumentFields: FarmerDocumentField[] = ['name', 'age', 'gender', 'aadhaar', 'address', 'date_of_birth'];
@@ -78,6 +78,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       if (body.error === 'document_required') throw new FarmerAuthError('documentRequired');
       if (body.error === 'invalid_document') throw new FarmerAuthError('invalidDocument');
       if (body.error === 'phone_verification_provider_not_configured') throw new FarmerAuthError('verificationNotConfigured');
+      if (body.error === 'verification_start_in_progress') throw new FarmerAuthError('verificationInProgress');
       if (['verification_provider_unavailable', 'verification_provider_response_invalid', 'verification_request_unavailable', 'verification_credits_exhausted', 'verification_line_not_configured'].includes(body.error ?? '')) throw new FarmerAuthError('verificationProviderFailure');
       if (body.error === 'verification_expired') throw new FarmerAuthError('verificationExpired');
       if (body.error === 'rate_limit_exceeded' || body.error === 'verification_resend_too_soon') throw new FarmerAuthError('rateLimited');
