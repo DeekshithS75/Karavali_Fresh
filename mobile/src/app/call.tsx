@@ -1,18 +1,19 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
-import { LiveKitRoom } from '@livekit/react-native';
 import { ScreenFrame, MarketColors } from '@/components/marketplace-ui';
 import { ConsumerAuthError, endConsumerInAppCall, joinConsumerInAppCall } from '@/features/consumer-auth/client';
 import { endFarmerInAppCall, FarmerAuthError, joinFarmerInAppCall } from '@/features/farmer-auth/client';
 
 type CallRole = 'farmer' | 'consumer';
 type CallCredentials = { serverUrl: string; participantToken: string };
+type LiveKitRoomComponent = typeof import('@livekit/react-native').LiveKitRoom;
 
 export default function InAppCallScreen() {
   const { sessionId, role } = useLocalSearchParams<{ sessionId?: string; role?: string }>();
   const callRole: CallRole = role === 'farmer' ? 'farmer' : 'consumer';
   const [credentials, setCredentials] = useState<CallCredentials | null>(null);
+  const [LiveKitRoom, setLiveKitRoom] = useState<LiveKitRoomComponent | null>(null);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState(!sessionId || Platform.OS === 'web');
   const [ending, setEnding] = useState(false);
@@ -20,6 +21,11 @@ export default function InAppCallScreen() {
   useEffect(() => {
     let active = true;
     if (!sessionId || Platform.OS === 'web') return () => { active = false; };
+    void import('@livekit/react-native').then(({ LiveKitRoom: Room, registerGlobals }) => {
+      if (!active) return;
+      registerGlobals();
+      setLiveKitRoom(() => Room);
+    }).catch(() => { if (active) setError(true); });
     const join = callRole === 'farmer' ? joinFarmerInAppCall(sessionId) : joinConsumerInAppCall(sessionId);
     void join.then((reply) => {
       if (active) setCredentials({ serverUrl: reply.serverUrl, participantToken: reply.participantToken });
@@ -47,7 +53,7 @@ export default function InAppCallScreen() {
     <Text style={styles.title}>Karavali Fresh call</Text>
     {error ? <Text accessibilityRole="alert" style={styles.body}>This call is unavailable. Return to the request and try again.</Text> : null}
     {!error && !credentials ? <><ActivityIndicator color={MarketColors.green} /><Text style={styles.body}>Joining your private call…</Text></> : null}
-    {credentials ? <LiveKitRoom
+    {credentials && LiveKitRoom ? <LiveKitRoom
       serverUrl={credentials.serverUrl}
       token={credentials.participantToken}
       connect
@@ -55,7 +61,7 @@ export default function InAppCallScreen() {
       onConnected={() => setConnected(true)}
       onDisconnected={() => setConnected(false)}
       onError={() => { setError(true); setCredentials(null); }}
-    ><Text style={styles.body}>{connected ? 'You are in the call. The other person can join from their notification.' : 'Connecting securely…'}</Text></LiveKitRoom> : null}
+    ><Text style={styles.body}>{connected ? 'You are in the call. The other person can join from their notification.' : 'Connecting securely…'}</Text></LiveKitRoom> : credentials ? <ActivityIndicator color={MarketColors.green} /> : null}
     <Pressable accessibilityRole="button" disabled={ending} onPress={() => void hangUp()} style={styles.hangup}>
       <Text style={styles.hangupText}>{ending ? 'Ending…' : 'End call'}</Text>
     </Pressable>

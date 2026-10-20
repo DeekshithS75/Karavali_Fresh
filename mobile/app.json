@@ -35,6 +35,14 @@
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "extraProguardRules": "# The prefixed LiveKit WebRTC AAR omits this optional generated JNI bridge.\n-dontwarn livekit.org.jni_zero.JniZeroJni"
+          }
+        }
+      ],
       "expo-router",
         "@livekit/react-native-expo-plugin",
         [
