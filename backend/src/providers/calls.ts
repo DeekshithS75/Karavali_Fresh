@@ -62,10 +62,12 @@ export async function createExotelBridgedCall(input: {
     CallerId: config.EXOTEL_CALLER_ID!,
     CallType: 'trans',
     StatusCallback: callbackUrl,
-    StatusCallbackEvents: 'terminal,answered',
     StatusCallbackContentType: 'application/json',
     CustomField: input.callAttemptId,
   });
+  // Exotel expects array members as indexed form fields, not a comma-delimited string.
+  parameters.append('StatusCallbackEvents[0]', 'terminal');
+  parameters.append('StatusCallbackEvents[1]', 'answered');
   let response: Response;
   try {
     response = await fetch(endpoint, {

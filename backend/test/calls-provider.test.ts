@@ -34,6 +34,7 @@ test('Exotel calls the Farmer first then bridges the Buyer using Basic auth and 
   assert.equal(parameters.get('CallerId'), '+911234567890');
   assert.equal(parameters.get('CallType'), 'trans');
   assert.equal(parameters.get('StatusCallbackContentType'), 'application/json');
+  assert.deepEqual([parameters.get('StatusCallbackEvents[0]'), parameters.get('StatusCallbackEvents[1]')], ['terminal', 'answered']);
   assert.equal(parameters.get('CustomField'), 'attempt-id-123');
   assert.match(parameters.get('StatusCallback') ?? '', /https:\/\/calls\.example\.test\/api\/provider\/exotel\/calls\/private-callback-token/);
   assert.equal(result.providerReference, 'CA123456789');
