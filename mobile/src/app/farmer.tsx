@@ -1,4 +1,4 @@
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, AppState, Pressable, StyleSheet, Text, View } from 'react-native';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Image } from 'expo-image';
@@ -12,9 +12,10 @@ import {
 } from '@/components/marketplace-ui';
 import { useLanguage } from '@/localization/LanguageProvider';
 import { FarmerDashboardGuard } from '@/components/farmer-auth-flow';
-import { FarmerAuthError, decideFarmerProduceRequest, deleteFarmerProduce, getFarmerMarketComparison, getFarmerNotifications, getFarmerProduce, getFarmerProfile, getFarmerRequests, getFarmerSessionState, type FarmerMarketComparison, type FarmerProduce, type FarmerProduceRequest, type FarmerProfile } from '@/features/farmer-auth/client';
+import { FarmerAuthError, deleteFarmerProduce, getFarmerMarketComparison, getFarmerNotifications, getFarmerProduce, getFarmerProfile, getFarmerSessionState, setFarmerPreferredLanguage, type FarmerMarketComparison, type FarmerProduce, type FarmerProfile } from '@/features/farmer-auth/client';
 import { FarmerMarketResults } from '@/components/farmer-market-results';
 import { registerAccountForPush } from '@/features/push-notifications';
+import { localizedProduceName } from '@/localization/produce-name';
 
 type ProfileState = 'loading' | 'loaded' | 'error' | 'missing';
 
@@ -32,16 +33,12 @@ export default function FarmerHomeScreen() {
   const [marketLoadingId, setMarketLoadingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deleteErrorId, setDeleteErrorId] = useState<string | null>(null);
-  const [incomingRequests, setIncomingRequests] = useState<FarmerProduceRequest[]>([]);
-  const [recentPendingRequests, setRecentPendingRequests] = useState<FarmerProduceRequest[]>([]);
-  const [farmerUnreadCount, setFarmerUnreadCount] = useState(0);
   const [pushStatus, setPushStatus] = useState<Awaited<ReturnType<typeof registerAccountForPush>> | null>(null);
-  const [requestActionId, setRequestActionId] = useState<string | null>(null);
-  const [requestSectionError, setRequestSectionError] = useState(false);
-  const [requestsLoading, setRequestsLoading] = useState(true);
   const marketController = useRef<AbortController | null>(null);
 
   useEffect(() => () => marketController.current?.abort(), []);
+
+  useEffect(() => { if (profileState === 'loaded') void setFarmerPreferredLanguage(language).catch(() => undefined); }, [profileState, language]);
 
   const compareMarketPrice = async (item: FarmerProduce) => {
     if (marketLoadingId) return;
@@ -81,7 +78,7 @@ export default function FarmerHomeScreen() {
         if (!active) return;
         setProfile(value);
         setProfileState('loaded');
-        void registerAccountForPush('farmer').then((status) => { if (active) setPushStatus(status); });
+        void registerAccountForPush('farmer', language).then((status) => { if (active) setPushStatus(status); });
       })
       .catch(async (error: unknown) => {
         if (!active || controller.signal.aborted) return;
@@ -101,7 +98,7 @@ export default function FarmerHomeScreen() {
       active = false;
       controller.abort();
     };
-  }, [retryCount]);
+  }, [retryCount, language]);
 
   useFocusEffect(useCallback(() => {
     let active = true;
@@ -118,25 +115,28 @@ export default function FarmerHomeScreen() {
         }
         if (active) setProduceState('error');
       });
-    setRequestsLoading(true);
-    Promise.all([getFarmerRequests(), getFarmerNotifications()])
-      .then(([requests, notices]) => {
-        if (active) {
-          const now = Date.now();
-          setIncomingRequests(requests.items);
-          setRecentPendingRequests(requests.items.filter((item) => item.status === 'pending' && now - new Date(item.createdAt).getTime() <= 2 * 60 * 60 * 1000));
-          setFarmerUnreadCount(notices.unreadCount);
-          setRequestSectionError(false);
-        }
-      })
-      .catch((error: unknown) => {
-        if (!active) return;
-        if (error instanceof FarmerAuthError && error.code === 'unauthorized') router.replace('/auth/farmer');
-        else setRequestSectionError(true);
-      })
-      .finally(() => { if (active) setRequestsLoading(false); });
     return () => { active = false; controller.abort(); };
   }, [produceRefreshKey]));
+
+  useFocusEffect(useCallback(() => {
+    let active = true;
+    let routedNotification: string | null = null;
+    const checkNewRequests = async () => {
+      try {
+        const result = await getFarmerNotifications();
+        const notice = result.items.find((item) => item.event === 'request_created' && !item.readAt && item.request?.status === 'pending');
+        if (active && notice?.request && routedNotification !== notice.id) {
+          routedNotification = notice.id;
+          router.replace({ pathname: '/farmer/requests', params: { requestId: notice.request.id } });
+        }
+      } catch (error) {
+        if (active && error instanceof FarmerAuthError && error.code === 'unauthorized') router.replace('/auth/farmer');
+      }
+    };
+    void checkNewRequests();
+    const subscription = AppState.addEventListener('change', (state) => { if (state === 'active') void checkNewRequests(); });
+    return () => { active = false; subscription.remove(); };
+  }, []));
 
   const retryProfile = () => {
     setProfile(null);
@@ -159,25 +159,6 @@ export default function FarmerHomeScreen() {
           if (error instanceof FarmerAuthError && error.code === 'unauthorized') { router.replace('/auth/farmer'); return; }
           setDeleteErrorId(item.id);
         } finally { setDeletingId(null); }
-      })(); } },
-    ]);
-  };
-
-  const decideRequest = (item: FarmerProduceRequest, decision: 'accepted' | 'rejected') => {
-    const title = decision === 'accepted' ? t('farmer.requests.acceptTitle') : t('farmer.requests.rejectTitle');
-    Alert.alert(title, t('farmer.requests.confirm').replace('{name}', item.listingName), [
-      { text: t('produce.deleteCancel'), style: 'cancel' },
-      { text: decision === 'accepted' ? t('farmer.requests.accept') : t('farmer.requests.reject'), style: decision === 'rejected' ? 'destructive' : 'default', onPress: () => { void (async () => {
-        setRequestActionId(item.id);
-        try {
-          await decideFarmerProduceRequest(item.id, decision);
-          await Promise.all([getFarmerRequests().then((result) => setIncomingRequests(result.items)), getFarmerNotifications().then((result) => setFarmerUnreadCount(result.unreadCount))]);
-          setRetryCount((count) => count + 1);
-          Alert.alert(t('farmer.requests.updatedTitle'), t('farmer.requests.updatedMessage'));
-        } catch (error) {
-          if (error instanceof FarmerAuthError && error.code === 'unauthorized') { router.replace('/auth/farmer'); return; }
-          Alert.alert(t('farmer.requests.errorTitle'), error instanceof FarmerAuthError && error.serverError === 'produce_request_insufficient_quantity' ? t('farmer.requests.insufficient') : t('farmer.requests.error'));
-        } finally { setRequestActionId(null); }
       })(); } },
     ]);
   };
@@ -208,6 +189,9 @@ export default function FarmerHomeScreen() {
           <Text style={styles.addIcon}>＋</Text>
           <Text style={styles.addButtonText}>{t('farmer.addProduce')}</Text>
         </Pressable>
+        <Pressable accessibilityRole="button" onPress={() => router.push('/farmer/requests')} style={styles.requestsLink}>
+          <Text style={styles.requestsLinkText}>{t('farmer.requests.title')}</Text>
+        </Pressable>
       </View>
 
       {pushStatus && pushStatus !== 'registered' && pushStatus !== 'unsupported_platform' ? <View accessibilityRole="alert" style={styles.pushNotice}><Text style={styles.listingMessage}>{t(pushStatus === 'denied' ? 'notifications.push.denied' : pushStatus === 'project_not_configured' ? 'notifications.push.projectMissing' : 'notifications.push.unavailable')}</Text></View> : null}
@@ -226,7 +210,7 @@ export default function FarmerHomeScreen() {
         /> : <View style={styles.listingStack}>{produce.map((item) => <View key={item.id} style={styles.produceCard}>
           <View style={styles.producePhotos}>{item.photos.length ? item.photos.map((photo, index) => <Image key={`${photo.url}-${index}`} source={{ uri: photo.url, headers: photo.headers }} style={styles.produceImage} accessibilityLabel={`${t('produce.photoPreview')} ${item.name} ${index + 1}`} />) : <View style={styles.produceImagePlaceholder}><Text style={styles.produceImageGlyph}>🌱</Text></View>}</View>
           <View style={styles.produceInfo}>
-            <Text style={styles.produceName}>{item.nameTranslations?.[language]?.trim() || item.name}</Text>
+            <Text style={styles.produceName}>{localizedProduceName(item.name, item.nameTranslations, language)}</Text>
             <Text style={styles.produceQuantity}>{t('produce.availableQuantity').replace('{quantity}', String(item.quantity)).replace('{unit}', t(`produce.unit.${item.unit}` as Parameters<typeof t>[0]))}</Text>
             {item.pricePerUnit != null ? <Text style={styles.producePrice}>{new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(item.pricePerUnit)} / {t(`produce.priceUnit.${item.priceUnit ?? item.unit}` as Parameters<typeof t>[0])}</Text> : <>
               <Text style={styles.pricePending}>{t('produce.status.awaitingPrice')}</Text>
@@ -249,33 +233,7 @@ export default function FarmerHomeScreen() {
         </View>)}</View>}
       </View>
 
-      <View style={styles.section}>
-        <SectionHeading title={t('farmer.requests.title')} detail={t('farmer.requests.detail')} />
-        {requestsLoading ? <Text style={styles.listingMessage}>{t('produce.loading')}</Text> : requestSectionError ? <View style={styles.listingError}><Text accessibilityRole="alert" style={styles.listingMessage}>{t('farmer.requests.loadError')}</Text><Pressable accessibilityRole="button" onPress={() => setRetryCount((count) => count + 1)} style={styles.profileRetry}><Text style={styles.profileRetryText}>{t('produce.retry')}</Text></Pressable></View> : incomingRequests.length === 0 ? <EmptyState icon="📨" title={t('farmer.requests.emptyTitle')} message={t('farmer.requests.emptyMessage')} /> : <View style={styles.listingStack}>
-          {incomingRequests.map((item) => <View key={item.id} style={styles.requestCard}>
-            {item.status === 'pending' ? <Text style={styles.produceName}>{item.buyerName ?? t('farmer.requests.buyer')}</Text> : null}
-            <Text style={styles.produceName}>{item.listingName}</Text>
-            <Text style={styles.produceQuantity}>{t('farmer.requests.quantity').replace('{quantity}', String(item.requestedQuantity)).replace('{unit}', t(('produce.unit.' + item.unit) as never))}</Text>
-            <Text style={styles.pricePending}>{t(('farmer.requests.status.' + item.status) as never)}</Text>
-            {item.status === 'pending' ? <View style={styles.requestActions}>
-              <Pressable accessibilityRole="button" disabled={Boolean(requestActionId)} onPress={() => decideRequest(item, 'accepted')} style={styles.addPriceButton}><Text style={styles.addPriceButtonText}>{requestActionId === item.id ? t('farmer.requests.working') : t('farmer.requests.accept')}</Text></Pressable>
-              <Pressable accessibilityRole="button" disabled={Boolean(requestActionId)} onPress={() => decideRequest(item, 'rejected')} style={styles.rejectButton}><Text style={styles.rejectButtonText}>{t('farmer.requests.reject')}</Text></Pressable>
-            </View> : null}
-          </View>)}
-        </View>}
-      </View>
 
-      <View style={styles.section}>
-        <SectionHeading title={t('farmer.notifications.title')} detail={String(farmerUnreadCount) + ' ' + t('farmer.notifications.unread')} />
-        {requestsLoading ? <Text style={styles.listingMessage}>{t('produce.loading')}</Text> : requestSectionError ? <Text accessibilityRole="alert" style={styles.listingMessage}>{t('farmer.requests.loadError')}</Text> : recentPendingRequests.length === 0 ? <Text style={styles.listingMessage}>{t('farmer.notifications.empty')}</Text> : <View style={styles.listingStack}>
-          {recentPendingRequests.map((item) => <View key={item.id} style={styles.requestCard}>
-            <Text style={styles.produceName}>{item.buyerName ?? t('farmer.requests.buyer')}</Text>
-            <Text style={styles.produceQuantity}>{item.listingName} · {t('farmer.requests.quantity').replace('{quantity}', String(item.requestedQuantity)).replace('{unit}', t(('produce.unit.' + item.unit) as never))}</Text>
-            <Text style={styles.produceQuantity}>{new Date(item.createdAt).toLocaleTimeString()}</Text>
-          </View>)}
-        </View>}
-        <Pressable accessibilityRole="button" onPress={() => router.push('/farmer/notifications')} style={styles.profileRetry}><Text style={styles.profileRetryText}>{t('farmer.notifications.viewAll')}</Text></Pressable>
-      </View>
 
     </ScreenFrame>
     </FarmerDashboardGuard>
@@ -309,6 +267,7 @@ const styles = StyleSheet.create({
   },
   addIcon: { color: '#FFFFFF', fontSize: 20, marginRight: 7 },
   addButtonText: { color: '#FFFFFF', fontSize: 14, fontWeight: '800' },
+  requestsLink: { minHeight: 42, alignSelf: 'flex-start', justifyContent: 'center', paddingHorizontal: 4, marginTop: 5 }, requestsLinkText: { color: MarketColors.greenDark, fontSize: 13, fontWeight: '800' },
   section: { marginBottom: 22 }, savedNotice: { backgroundColor: MarketColors.greenSoft, borderRadius: 12, padding: 12, marginTop: -8, marginBottom: 18 }, savedNoticeText: { color: MarketColors.greenDark, fontSize: 13, fontWeight: '700' }, listingMessage: { color: MarketColors.muted, fontSize: 13, lineHeight: 19 }, listingError: { borderRadius: 13, backgroundColor: '#FFF4D6', padding: 12 }, listingStack: { gap: 10 }, produceCard: { gap: 10, backgroundColor: '#FFFFFF', borderRadius: 16, borderWidth: 1, borderColor: MarketColors.border, padding: 10 }, producePhotos: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 }, produceImage: { width: 64, height: 64, borderRadius: 10, backgroundColor: MarketColors.background }, produceImagePlaceholder: { width: 64, height: 64, borderRadius: 10, backgroundColor: MarketColors.greenSoft, alignItems: 'center', justifyContent: 'center' }, produceImageGlyph: { fontSize: 24 }, produceInfo: { gap: 4 }, produceName: { color: MarketColors.text, fontSize: 15, fontWeight: '800' }, produceQuantity: { color: MarketColors.muted, fontSize: 12 }, producePrice: { color: MarketColors.greenDark, fontSize: 13, fontWeight: '800' }, pricePending: { color: MarketColors.blue, fontSize: 11, fontWeight: '700' }, addPriceButton: { minHeight: 36, alignSelf: 'flex-start', justifyContent: 'center', paddingHorizontal: 10, borderRadius: 9, backgroundColor: MarketColors.greenSoft }, addPriceButtonText: { color: MarketColors.greenDark, fontSize: 12, fontWeight: '800' },
   marketCompareButton: { minHeight: 38, alignSelf: 'flex-start', justifyContent: 'center', paddingHorizontal: 12, borderRadius: 10, backgroundColor: MarketColors.blueSoft }, marketCompareDisabled: { opacity: 0.5 }, marketCompareText: { color: MarketColors.blue, fontSize: 12, fontWeight: '800' }, marketResultPanel: { backgroundColor: MarketColors.blueSoft, borderRadius: 12, padding: 10, gap: 6, marginTop: 4 }, marketRow: { borderTopWidth: 1, borderTopColor: MarketColors.border, paddingTop: 8, marginTop: 4, gap: 3 }, marketName: { color: MarketColors.text, fontSize: 13, fontWeight: '800' }, marketMessage: { color: MarketColors.muted, fontSize: 12, lineHeight: 18 }, marketAttribution: { color: MarketColors.muted, fontSize: 10, lineHeight: 15, marginTop: 3 },
   requestCard: { gap: 6, padding: 12, backgroundColor: '#FFFFFF', borderRadius: 14, borderWidth: 1, borderColor: MarketColors.border }, requestActions: { flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginTop: 4 }, rejectButton: { minHeight: 36, alignSelf: 'flex-start', justifyContent: 'center', paddingHorizontal: 10, borderRadius: 9, backgroundColor: '#FDECEC' }, rejectButtonText: { color: '#B42318', fontSize: 12, fontWeight: '800' },

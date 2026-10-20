@@ -2,6 +2,7 @@ import mongoose, { Schema, type InferSchemaType } from 'mongoose';
 
 const farmerSchema = new Schema({
   fullName: { type: String, required: true },
+  preferredLanguage: { type: String, enum: ['en', 'kn', 'tcy'], default: 'en' },
   age: { type: Number, required: true },
   gender: { type: String, enum: ['male', 'female', 'other'], required: true },
   phone: { type: String, required: true, unique: true, index: true },
@@ -19,6 +20,7 @@ const farmerSchema = new Schema({
 
 const consumerSchema = new Schema({
   fullName: { type: String, required: true, trim: true, maxlength: 100 },
+  preferredLanguage: { type: String, enum: ['en', 'kn', 'tcy'], default: 'en' },
   email: { type: String, required: true, unique: true, index: true, lowercase: true, trim: true, maxlength: 254 },
   passwordHash: { type: String, required: true, select: false },
   accountStatus: { type: String, enum: ['active'], required: true, default: 'active' },
@@ -120,6 +122,12 @@ const produceRequestSchema = new Schema({
   listingId: { type: Schema.Types.ObjectId, ref: 'FarmerProduce', required: true, index: true },
   farmerId: { type: Schema.Types.ObjectId, ref: 'Farmer', required: true, index: true },
   listingName: { type: String, required: true, maxlength: 120 },
+  listingNameTranslations: {
+    en: { type: String, trim: true, maxlength: 120 },
+    kn: { type: String, trim: true, maxlength: 120 },
+    tcy: { type: String, trim: true, maxlength: 120 },
+  },
+  commodityKey: { type: String, required: true, maxlength: 120 },
   listingPricePerUnit: { type: Number, required: true, min: Number.MIN_VALUE },
   listingPriceUnit: { type: String, enum: ['kg', 'quintal', 'bunch', 'pieces'], required: true },
   requestedQuantity: { type: Number, required: true, min: Number.MIN_VALUE, max: 1_000_000_000 },
@@ -132,6 +140,7 @@ const produceRequestSchema = new Schema({
 produceRequestSchema.index({ buyerId: 1, createdAt: -1 });
 produceRequestSchema.index({ farmerId: 1, status: 1, createdAt: -1 });
 produceRequestSchema.index({ buyerId: 1, requestKey: 1 }, { unique: true, partialFilterExpression: { requestKey: { $type: 'string' } } });
+produceRequestSchema.index({ buyerId: 1, farmerId: 1, commodityKey: 1 }, { unique: true, partialFilterExpression: { status: { $in: ['pending', 'accepted'] }, commodityKey: { $type: 'string' } } });
 
 const notificationSchema = new Schema({
   recipientRole: { type: String, enum: ['consumer', 'farmer'], required: true, index: true },

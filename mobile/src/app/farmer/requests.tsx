@@ -1,0 +1,64 @@
+import { router, useLocalSearchParams } from 'expo-router';
+import { useCallback, useEffect, useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { FarmerDashboardGuard } from '@/components/farmer-auth-flow';
+import { EmptyState, MarketColors, ScreenFrame, SectionHeading } from '@/components/marketplace-ui';
+import { FarmerAuthError, decideFarmerProduceRequest, getFarmerNotifications, getFarmerRequests, markFarmerNotificationRead, type FarmerProduceRequest } from '@/features/farmer-auth/client';
+import { useLanguage } from '@/localization/LanguageProvider';
+import { localizedProduceName } from '@/localization/produce-name';
+
+export default function FarmerRequestsScreen() {
+  const { t, language } = useLanguage();
+  const { requestId } = useLocalSearchParams<{ requestId?: string }>();
+  const [items, setItems] = useState<FarmerProduceRequest[]>([]);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true); setError(false);
+    try {
+      const [requests, notices] = await Promise.all([getFarmerRequests(), getFarmerNotifications()]);
+      setItems([...requests.items].sort((a, b) => Number(b.status === 'pending') - Number(a.status === 'pending') || new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
+      const justViewed = new Set(requests.items.map((item) => item.id));
+      await Promise.all(notices.items.filter((notice) => notice.event === 'request_created' && notice.request && justViewed.has(notice.request.id) && !notice.readAt).map((notice) => markFarmerNotificationRead(notice.id)));
+    } catch (reason) {
+      if (reason instanceof FarmerAuthError && reason.code === 'unauthorized') router.replace('/auth/farmer');
+      else setError(true);
+    } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const decide = (item: FarmerProduceRequest, decision: 'accepted' | 'rejected') => {
+    Alert.alert(t(decision === 'accepted' ? 'farmer.requests.acceptTitle' : 'farmer.requests.rejectTitle'), t('farmer.requests.confirm').replace('{name}', item.listingName), [
+      { text: t('produce.deleteCancel'), style: 'cancel' },
+      { text: t(decision === 'accepted' ? 'farmer.requests.accept' : 'farmer.requests.reject'), style: decision === 'rejected' ? 'destructive' : 'default', onPress: () => {
+        setBusyId(item.id);
+        void decideFarmerProduceRequest(item.id, decision).then(load).catch(() => setError(true)).finally(() => setBusyId(null));
+      } },
+    ]);
+  };
+
+  return <FarmerDashboardGuard><ScreenFrame>
+    <Pressable accessibilityRole="button" onPress={() => router.replace('/farmer')} style={styles.back}><Text style={styles.backText}>‹ {t('navigation.welcome')}</Text></Pressable>
+    <SectionHeading title={t('farmer.requests.title')} detail={t('farmer.requests.detail')} />
+    {loading && !items.length ? <View style={styles.center}><ActivityIndicator color={MarketColors.green} /></View> : error ? <View style={styles.card}><Text accessibilityRole="alert" style={styles.error}>{t('farmer.requests.loadError')}</Text><Pressable accessibilityRole="button" onPress={() => void load()} style={styles.button}><Text style={styles.buttonText}>{t('produce.retry')}</Text></Pressable></View> : items.length === 0 ? <EmptyState icon="📨" title={t('farmer.requests.emptyTitle')} message={t('farmer.requests.emptyMessage')} /> : <View style={styles.list}>
+      {items.map((item) => <View key={item.id} style={[styles.card, requestId === item.id && styles.selected]}>
+        <Text style={styles.buyer}>{item.buyerName ?? t('farmer.requests.buyer')}</Text>
+        <Text style={styles.name}>{localizedProduceName(item.listingName, item.listingNameTranslations, language)}</Text>
+        <Text style={styles.body}>{t('farmer.requests.quantity').replace('{quantity}', String(item.requestedQuantity)).replace('{unit}', t(('produce.unit.' + item.unit) as never))}</Text>
+        <Text style={styles.body}>{new Date(item.createdAt).toLocaleString()}</Text>
+        <Text style={styles.status}>{t(('farmer.requests.status.' + item.status) as never)}</Text>
+        {item.status === 'pending' ? <View style={styles.actions}>
+          <Pressable accessibilityRole="button" disabled={Boolean(busyId)} onPress={() => decide(item, 'accepted')} style={styles.button}><Text style={styles.buttonText}>{busyId === item.id ? t('farmer.requests.working') : t('farmer.requests.accept')}</Text></Pressable>
+          <Pressable accessibilityRole="button" disabled={Boolean(busyId)} onPress={() => decide(item, 'rejected')} style={styles.reject}><Text style={styles.rejectText}>{t('farmer.requests.reject')}</Text></Pressable>
+        </View> : null}
+      </View>)}
+    </View>}
+  </ScreenFrame></FarmerDashboardGuard>;
+}
+
+const styles = StyleSheet.create({
+  back: { minHeight: 44, alignSelf: 'flex-start', justifyContent: 'center', paddingHorizontal: 6 }, backText: { color: MarketColors.greenDark, fontWeight: '800' }, center: { minHeight: 240, alignItems: 'center', justifyContent: 'center' }, list: { gap: 10, marginTop: 14 }, card: { gap: 7, padding: 14, borderRadius: 15, borderWidth: 1, borderColor: MarketColors.border, backgroundColor: MarketColors.card }, selected: { borderColor: MarketColors.green, borderWidth: 2 }, buyer: { color: MarketColors.text, fontSize: 14, fontWeight: '800' }, name: { color: MarketColors.text, fontSize: 16, fontWeight: '700' }, body: { color: MarketColors.muted, fontSize: 12, lineHeight: 18 }, status: { color: MarketColors.blue, fontSize: 12, fontWeight: '800' }, actions: { flexDirection: 'row', gap: 8, marginTop: 4 }, button: { minHeight: 42, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 14, borderRadius: 11, backgroundColor: MarketColors.green }, buttonText: { color: '#fff', fontWeight: '800' }, reject: { minHeight: 42, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 14, borderRadius: 11, backgroundColor: '#FDECEC' }, rejectText: { color: '#B42318', fontWeight: '800' }, error: { color: '#B42318' },
+});

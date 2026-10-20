@@ -137,6 +137,7 @@ const kn: Partial<Record<TranslationKey, string>> = {
   'consumer.farmerName': 'ರೈತರು',
   'consumer.viewDetails': 'ವಿವರ ನೋಡಿ',
   'consumer.requestSent': 'ನಿಮ್ಮ ವಿನಂತಿಯನ್ನು ರೈತರಿಗೆ ಕಳುಹಿಸಲಾಗಿದೆ.',
+  'consumer.requestedLabel': 'ವಿನಂತಿಸಲಾಗಿದೆ',
   'consumer.callFarmer': 'ರೈತರಿಗೆ ಕರೆ ಮಾಡಿ: {phone}',
   'consumer.callError': 'ಈ ಸಾಧನದಲ್ಲಿ ಕರೆ ಮಾಡಲು ಸಾಧ್ಯವಿಲ್ಲ.',
   'consumer.viewRequest': 'ವಿನಂತಿ ನೋಡಿ',

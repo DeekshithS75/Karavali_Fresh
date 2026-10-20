@@ -1,13 +1,14 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { FarmerDashboardGuard } from '@/components/farmer-auth-flow';
 import { MarketColors, ScreenFrame, SectionHeading } from '@/components/marketplace-ui';
-import { FarmerAuthError, decideFarmerProduceRequest, getFarmerNotifications, markFarmerNotificationRead, type FarmerNotification } from '@/features/farmer-auth/client';
+import { FarmerAuthError, getFarmerNotifications, markFarmerNotificationRead, type FarmerNotification } from '@/features/farmer-auth/client';
 import { useLanguage } from '@/localization/LanguageProvider';
+import { localizedProduceName } from '@/localization/produce-name';
 
 export default function FarmerNotificationsScreen() {
-  const { t } = useLanguage();
+  const { t, language } = useLanguage();
   const { notificationId } = useLocalSearchParams<{ notificationId?: string }>();
   const [items, setItems] = useState<FarmerNotification[]>([]);
   const [unread, setUnread] = useState(0);
@@ -35,18 +36,6 @@ export default function FarmerNotificationsScreen() {
 
   useEffect(() => { void Promise.resolve().then(() => load()); }, [load]);
 
-  const decide = (item: FarmerNotification, decision: 'accepted' | 'rejected') => {
-    const request = item.request;
-    if (!request || request.status !== 'pending') return;
-    Alert.alert(t(decision === 'accepted' ? 'farmer.requests.acceptTitle' : 'farmer.requests.rejectTitle'), t('farmer.requests.confirm').replace('{name}', request.listingName), [
-      { text: t('produce.deleteCancel'), style: 'cancel' },
-      { text: t(decision === 'accepted' ? 'farmer.requests.accept' : 'farmer.requests.reject'), style: decision === 'rejected' ? 'destructive' : 'default', onPress: () => {
-        setBusyId(request.id);
-        void decideFarmerProduceRequest(request.id, decision).then(() => load()).catch(() => setError(true)).finally(() => setBusyId(null));
-      } },
-    ]);
-  };
-
   const markRead = async (item: FarmerNotification) => {
     setBusyId(item.id);
     try { await markFarmerNotificationRead(item.id); setItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, readAt: new Date().toISOString() } : entry)); setUnread((value) => Math.max(0, value - 1)); }
@@ -62,12 +51,9 @@ export default function FarmerNotificationsScreen() {
         <Text style={styles.title}>{t(('farmer.notifications.event.' + item.event) as never)}{!item.readAt ? ' · ●' : ''}</Text>
         {item.request ? <>
           <Text style={styles.name}>{item.request.buyerName ?? t('farmer.requests.buyer')}</Text>
-          <Text style={styles.help}>{item.request.listingName} · {t('farmer.requests.quantity').replace('{quantity}', String(item.request.requestedQuantity)).replace('{unit}', t(('produce.unit.' + item.request.unit) as never))}</Text>
+          <Text style={styles.help}>{localizedProduceName(item.request.listingName, item.request.listingNameTranslations, language)} · {t('farmer.requests.quantity').replace('{quantity}', String(item.request.requestedQuantity)).replace('{unit}', t(('produce.unit.' + item.request.unit) as never))}</Text>
           <Text style={styles.help}>{t(('farmer.requests.status.' + item.request.status) as never)} · {new Date(item.createdAt).toLocaleString()}</Text>
-          {item.request.status === 'pending' ? <View style={styles.actions}>
-            <Pressable accessibilityRole="button" disabled={busyId === item.request.id} onPress={() => decide(item, 'accepted')} style={styles.button}><Text style={styles.buttonText}>{t(busyId === item.request.id ? 'farmer.requests.working' : 'farmer.requests.accept')}</Text></Pressable>
-            <Pressable accessibilityRole="button" disabled={busyId === item.request.id} onPress={() => decide(item, 'rejected')} style={styles.reject}><Text style={styles.rejectText}>{t('farmer.requests.reject')}</Text></Pressable>
-          </View> : null}
+          <Pressable accessibilityRole="button" onPress={() => router.push({ pathname: '/farmer/requests', params: { requestId: item.request!.id } })} style={styles.read}><Text style={styles.readText}>{t('farmer.requests.title')}</Text></Pressable>
         </> : null}
         {!item.readAt ? <Pressable accessibilityRole="button" disabled={busyId === item.id} onPress={() => void markRead(item)} style={styles.read}><Text style={styles.readText}>{t('farmer.notifications.markRead')}</Text></Pressable> : null}
       </View>)}

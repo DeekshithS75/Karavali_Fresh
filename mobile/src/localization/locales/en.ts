@@ -133,6 +133,7 @@ const en = {
   'consumer.farmerName': 'Farmer',
   'consumer.viewDetails': 'View details',
   'consumer.requestSent': 'Your request has been sent to the farmer.',
+  'consumer.requestedLabel': 'Requested',
   'consumer.callFarmer': 'Call farmer: {phone}',
   'consumer.callError': 'Calling is not available on this device.',
   'consumer.viewRequest': 'View request',

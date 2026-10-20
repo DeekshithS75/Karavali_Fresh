@@ -177,7 +177,7 @@ export async function hasValidFarmerSession(): Promise<boolean> {
   return (await getFarmerSessionState()) === 'valid';
 }
 
-export type FarmerProfile = { fullName: string };
+export type FarmerProfile = { fullName: string; preferredLanguage?: 'en' | 'kn' | 'tcy' };
 
 export type FarmerProduce = {
   id: string;
@@ -196,7 +196,7 @@ export type FarmerProduce = {
 };
 
 export type FarmerProduceRequest = {
-  id: string; listingId: string; listingName: string; buyerName?: string; requestedQuantity: number; unit: string;
+  id: string; listingId: string; listingName: string; listingNameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; buyerName?: string; requestedQuantity: number; unit: string;
   status: 'pending' | 'accepted' | 'rejected' | 'cancelled'; createdAt: string; decidedAt: string | null;
 };
 
@@ -390,7 +390,13 @@ export async function getFarmerProfile(signal?: AbortSignal): Promise<FarmerProf
   if (!result?.profile || typeof result.profile.fullName !== 'string' || !result.profile.fullName.trim()) {
     throw new FarmerAuthError('rejected');
   }
-  return { fullName: result.profile.fullName };
+  return { fullName: result.profile.fullName, preferredLanguage: result.profile.preferredLanguage };
+}
+
+export async function setFarmerPreferredLanguage(language: 'en' | 'kn' | 'tcy') {
+  const tokens = await readTokens();
+  if (!tokens) throw new FarmerAuthError('unauthorized');
+  return request<{ language: 'en' | 'kn' | 'tcy' }>('/api/farmer/profile/language', { method: 'PATCH', headers: { Authorization: `Bearer ${tokens.accessToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ language }) });
 }
 
 export async function submitFarmerRegistration(data: FarmerRegistration, imageUri: string, imageType: string, privacyNoticeVersion: string) {

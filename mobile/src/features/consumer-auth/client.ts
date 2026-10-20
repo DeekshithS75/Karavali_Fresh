@@ -13,7 +13,7 @@ const storage = createSessionStorage(CONSUMER_SESSION_KEY, Platform.OS === 'web'
 });
 
 export class ConsumerAuthError extends Error {
-  constructor(readonly code: 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'emailRegistered' | 'invalidCredentials' | 'configurationIncomplete' | 'rateLimited' | 'validationFailed') { super(code); }
+  constructor(readonly code: 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'emailRegistered' | 'invalidCredentials' | 'configurationIncomplete' | 'rateLimited' | 'validationFailed', readonly serverError: string | null = null) { super(code); }
 }
 
 export type ConsumerListing = {
@@ -36,7 +36,7 @@ export type ConsumerMarketComparison = {
   items: { modalPrice: number | null; priceUnit: string | null; sourceDate: string; district: string; market: string; stale: boolean }[];
 };
 
-export type ConsumerListingDetail = Omit<ConsumerListing, 'photoUrl' | 'distanceBand'> & { photoUrls: string[] };
+export type ConsumerListingDetail = Omit<ConsumerListing, 'photoUrl' | 'distanceBand'> & { photoUrls: string[]; existingRequest: { id: string; status: 'pending' | 'accepted' } | null };
 
 export type ConsumerListingQuery = {
   search?: string;
@@ -48,7 +48,7 @@ export type ConsumerListingQuery = {
 };
 
 export type ConsumerProduceRequest = {
-  id: string; listingId: string; listingName: string; pricePerUnit: number; priceUnit: string;
+  id: string; listingId: string; listingName: string; listingNameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; pricePerUnit: number; priceUnit: string;
   requestedQuantity: number; unit: string; status: 'pending' | 'accepted' | 'rejected' | 'cancelled';
   createdAt: string; decidedAt: string | null; farmerContact?: { name: string; phone: string };
 };
@@ -80,6 +80,7 @@ async function request<T>(path: string, init: RequestInit = {}) {
     if (body.error === 'session_signing_not_configured') throw new ConsumerAuthError('configurationIncomplete');
     if (body.error === 'rate_limit_exceeded') throw new ConsumerAuthError('rateLimited');
     if (body.error === 'validation_failed') throw new ConsumerAuthError('validationFailed');
+    if (typeof body.error === 'string' && body.error.startsWith('produce_request_')) throw new ConsumerAuthError('rejected', body.error);
     throw new ConsumerAuthError('rejected');
   }
   if (response.status === 204) return undefined as T;
@@ -112,6 +113,12 @@ export async function getConsumerProfile() {
   const tokens = await storage.read();
   if (!tokens) throw new ConsumerAuthError('unauthorized');
   return request<{ valid: true; role: 'consumer'; consumerId: string; fullName: string }>('/api/consumer/auth/session', { headers: { Authorization: `Bearer ${tokens.accessToken}` } });
+}
+
+export async function setConsumerPreferredLanguage(language: 'en' | 'kn' | 'tcy') {
+  const tokens = await storage.read();
+  if (!tokens) throw new ConsumerAuthError('unauthorized');
+  return request<{ language: 'en' | 'kn' | 'tcy' }>('/api/consumer/profile/language', { method: 'PATCH', headers: { Authorization: `Bearer ${tokens.accessToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ language }) });
 }
 
 export async function logoutConsumer() {

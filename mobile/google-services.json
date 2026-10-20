@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "1086059384325",
+    "project_id": "karavali-fresh",
+    "storage_bucket": "karavali-fresh.firebasestorage.app"
+  },
+  "client": [
+    {
+ 
+      "client_info": {
+        "mobilesdk_app_id": "1:1086059384325:android:985a235f0d6190808b166c",
+        "android_client_info": {
+          "package_name": "com.deekshiths75.mobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAYjVea9TXKQia9d2qrCjPg5cMAbK0znPo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -8,7 +8,9 @@ import { LanguageSelector } from '@/components/language-selector';
 import { EmptyState, MarketColors, ScreenFrame, SectionHeading } from '@/components/marketplace-ui';
 import { useLanguage } from '@/localization/LanguageProvider';
 import { registerAccountForPush } from '@/features/push-notifications';
-import { ConsumerAuthError, createConsumerRequestKey, getConsumerListings, getConsumerNotifications, getConsumerPhotoHeaders, getConsumerProfile, getConsumerRequests, getConsumerSessionState, logoutConsumer, markConsumerNotificationRead, requestConsumerProduce, type ConsumerListing, type ConsumerListingQuery, type ConsumerNotification, type ConsumerProduceRequest } from '@/features/consumer-auth/client';
+import { localizedProduceName } from '@/localization/produce-name';
+import { ConsumerAuthError, getConsumerListings, getConsumerNotifications, getConsumerPhotoHeaders, getConsumerProfile, getConsumerRequests, getConsumerSessionState, logoutConsumer, markConsumerNotificationRead, setConsumerPreferredLanguage, type ConsumerListing, type ConsumerListingQuery, type ConsumerNotification, type ConsumerProduceRequest } from '@/features/consumer-auth/client';
+import { localizedProduceName } from '@/localization/produce-name';
 
 type Sort = NonNullable<ConsumerListingQuery['sort']>;
 
@@ -36,12 +38,6 @@ export default function ConsumerHomeScreen() {
   const [section, setSection] = useState<'browse' | 'requests' | 'notifications'>('browse');
   const activeSection = params.section === 'requests' || params.section === 'notifications' ? params.section : section;
   const selectedRequestId = params.requestId ?? null;
-  const [requestFor, setRequestFor] = useState<string | null>(null);
-  const [requestKey, setRequestKey] = useState<string | null>(null);
-  const [requestedQuantity, setRequestedQuantity] = useState('');
-  const [requestError, setRequestError] = useState('');
-  const [requestSentFor, setRequestSentFor] = useState<string | null>(null);
-  const [sendingRequest, setSendingRequest] = useState(false);
   const [myRequests, setMyRequests] = useState<ConsumerProduceRequest[]>([]);
   const [notifications, setNotifications] = useState<ConsumerNotification[]>([]);
   const [notificationsPage, setNotificationsPage] = useState(1);
@@ -76,6 +72,8 @@ export default function ConsumerHomeScreen() {
     void Promise.resolve().then(() => restoreSession(() => active)).catch(() => { if (active) setSessionError(true); });
     return () => { active = false; };
   }, [restoreSession]);
+
+  useEffect(() => { if (sessionReady) void setConsumerPreferredLanguage(language).catch(() => undefined); }, [sessionReady, language]);
 
   useEffect(() => {
     if (!sessionReady) return;
@@ -155,25 +153,6 @@ export default function ConsumerHomeScreen() {
     return undefined;
   }, [sessionReady, refreshBuyerActivity]));
 
-  const submitRequest = async (item: ConsumerListing) => {
-    const quantity = Number(requestedQuantity);
-    if (!Number.isFinite(quantity) || quantity <= 0 || quantity > item.quantity) { setRequestError(t('consumer.requestQuantityInvalid')); return; }
-    setSendingRequest(true);
-    setRequestError('');
-    try {
-      if (!requestKey) { setRequestError(t('consumer.requestError')); return; }
-      await requestConsumerProduce(item.id, quantity, requestKey);
-      setRequestFor(null);
-      setRequestSentFor(item.id);
-      setRequestKey(null);
-      setRequestedQuantity('');
-      await refreshBuyerActivity();
-    } catch (error) {
-      if (error instanceof ConsumerAuthError && error.code === 'unauthorized') router.replace('/auth/consumer/login');
-      else setRequestError(t('consumer.requestError'));
-    } finally { setSendingRequest(false); }
-  };
-
   const markRead = async (id: string) => {
     try { await markConsumerNotificationRead(id); await refreshBuyerActivity(); }
     catch { setRequestLoadError(true); }
@@ -233,28 +212,19 @@ export default function ConsumerHomeScreen() {
       <SectionHeading title={t('consumer.listingsTitle')} detail={t('consumer.listingsDetail')} />
       {loadState === 'loading' ? <View style={styles.loading}><ActivityIndicator color={MarketColors.green} /><Text style={styles.help}>{t('consumer.loading')}</Text></View> : loadState === 'error' ? <View style={styles.errorPanel}><Text accessibilityRole="alert" style={styles.error}>{t('consumer.loadError')}</Text><Pressable accessibilityRole="button" onPress={() => setRetry((value) => value + 1)} style={styles.secondary}><Text style={styles.secondaryText}>{t('consumer.retry')}</Text></Pressable></View> : items.length === 0 ? <EmptyState icon="🧺" title={t('consumer.emptyTitle')} message={t('consumer.emptyMessage')} /> : <View style={styles.listings}>
         {items.map((item) => {
-          const displayName = item.nameTranslations?.[language]?.trim() || item.nameTranslations?.en?.trim() || item.name;
+          const displayName = localizedProduceName(item.name, item.nameTranslations, language);
           const photoKey = `${item.id}:0`;
-          return <View key={item.id} style={styles.card}>
+          return <Pressable key={item.id} accessibilityRole="button" onPress={() => router.push({ pathname: '/consumer/produce/[produceId]', params: { produceId: item.id } })} style={styles.card}>
             {item.photoUrl && !failedPhotos.includes(photoKey) ? <Image source={{ uri: item.photoUrl, headers: photoHeaders }} contentFit="cover" onError={() => setFailedPhotos((current) => [...current, photoKey])} style={styles.photo} accessibilityLabel={`${t('consumer.photo')} ${displayName}`} /> : <View style={styles.photoPlaceholder}><Text style={styles.placeholderGlyph}>🥬</Text></View>}
             <View style={styles.cardInfo}>
               <Text style={styles.productName}>{displayName}</Text>
               <Text style={styles.price}>{t('consumer.askingPrice')}: {new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(item.pricePerUnit)} / {t(`produce.priceUnit.${item.priceUnit}` as never)}</Text>
               {item.marketComparison?.status === 'available' && item.marketComparison.items.some((quote) => quote.modalPrice !== null && !quote.stale) ? <><Text style={styles.marketPrice}>{t('consumer.marketPrice')}: {new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(item.marketComparison.items.find((quote) => quote.modalPrice !== null && !quote.stale)!.modalPrice!)} · {item.marketComparison.items.find((quote) => quote.modalPrice !== null && !quote.stale)!.sourceDate}</Text><Text style={styles.help}>{t('consumer.marketRegionalShort')}</Text></> : <Text style={styles.help}>{t('consumer.marketUnavailable')}</Text>}
               {item.farmerName ? <Text style={styles.locality}>{t('consumer.farmerName')}: {item.farmerName}</Text> : null}
-              {requestSentFor === item.id ? <Text accessibilityRole="alert" style={styles.requestSuccess}>{t('consumer.requestSent')}</Text> : null}
-              {requestFor === item.id ? <View style={styles.requestForm}>
-                <Text style={styles.quantity}>{t('consumer.requestUnit').replace('{unit}', t(('produce.unit.' + item.unit) as never))}</Text>
-                <TextInput accessibilityLabel={t('consumer.requestQuantity')} keyboardType="decimal-pad" value={requestedQuantity} onChangeText={setRequestedQuantity} placeholder={t('consumer.requestQuantity')} style={styles.requestInput} />
-                {requestError ? <Text accessibilityRole="alert" style={styles.error}>{requestError}</Text> : null}
-                <Pressable accessibilityRole="button" disabled={sendingRequest} onPress={() => void submitRequest(item)} style={styles.requestButton}><Text style={styles.requestButtonText}>{t(sendingRequest ? 'consumer.requestSending' : 'consumer.requestSubmit')}</Text></Pressable>
-                <Pressable accessibilityRole="button" onPress={() => { setRequestFor(null); setRequestKey(null); setRequestError(''); }}><Text style={styles.secondaryText}>{t('consumer.requestCancel')}</Text></Pressable>
-              </View> : <Pressable accessibilityRole="button" onPress={() => { setRequestFor(item.id); setRequestKey(createConsumerRequestKey()); setRequestError(''); setRequestedQuantity(''); }} style={styles.requestButton}><Text style={styles.requestButtonText}>{t('consumer.requestProduce')}</Text></Pressable>}
               <Text style={styles.quantity}>{t('consumer.quantityAvailable').replace('{quantity}', String(item.quantity)).replace('{unit}', t(`produce.unit.${item.unit}` as never))}</Text>
               <Text style={styles.locality}>{t(item.distanceBand ? `consumer.distance.${item.distanceBand}` as never : 'consumer.locationNotShared')}</Text>
-              <Pressable accessibilityRole="button" onPress={() => router.push({ pathname: '/consumer/produce/[produceId]', params: { produceId: item.id } })} style={styles.detailsButton}><Text style={styles.detailsText}>{t('consumer.viewDetails')}</Text></Pressable>
             </View>
-          </View>;
+          </Pressable>;
         })}
         {hasMore ? <Pressable accessibilityRole="button" disabled={loadingMore} onPress={() => void loadMore()} style={styles.secondary}><Text style={styles.secondaryText}>{t(loadingMore ? 'consumer.loading' : 'consumer.loadMore')}</Text></Pressable> : null}
       </View>}
@@ -263,7 +233,7 @@ export default function ConsumerHomeScreen() {
       <SectionHeading title={t('consumer.requestsTitle')} />
       {activityLoading ? <View style={styles.loading}><ActivityIndicator color={MarketColors.green} /><Text style={styles.help}>{t('consumer.loading')}</Text></View> : requestLoadError ? <View style={styles.errorPanel}><Text accessibilityRole="alert" style={styles.error}>{t('consumer.loadError')}</Text><Pressable accessibilityRole="button" onPress={() => void refreshBuyerActivity()} style={styles.secondary}><Text style={styles.secondaryText}>{t('consumer.retry')}</Text></Pressable></View> : myRequests.length === 0 ? <EmptyState icon="🧺" title={t('consumer.requestsEmpty')} message={t('consumer.requestsEmptyDetail')} /> : <View style={styles.listings}>
         {myRequests.map((item) => <View key={item.id} style={[styles.activityCard, item.id === selectedRequestId && styles.selectedRequest]}>
-          <Text style={styles.productName}>{item.listingName}</Text>
+          <Text style={styles.productName}>{localizedProduceName(item.listingName, item.listingNameTranslations, language)}</Text>
           <Text style={styles.quantity}>{t('consumer.requestedAmount').replace('{quantity}', String(item.requestedQuantity)).replace('{unit}', t(('produce.unit.' + item.unit) as never))}</Text>
           <Text style={styles.price}>{t(('consumer.requestStatus.' + item.status) as never)}</Text>
           <Text style={styles.quantity}>{t('consumer.priceAtRequest').replace('{price}', new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(item.pricePerUnit)).replace('{unit}', t(('produce.priceUnit.' + item.priceUnit) as never))}</Text>
@@ -275,7 +245,7 @@ export default function ConsumerHomeScreen() {
       {activityLoading ? <View style={styles.loading}><ActivityIndicator color={MarketColors.green} /><Text style={styles.help}>{t('consumer.loading')}</Text></View> : requestLoadError ? <View style={styles.errorPanel}><Text accessibilityRole="alert" style={styles.error}>{t('consumer.loadError')}</Text><Pressable accessibilityRole="button" onPress={() => void refreshBuyerActivity()} style={styles.secondary}><Text style={styles.secondaryText}>{t('consumer.retry')}</Text></Pressable></View> : notifications.length === 0 ? <EmptyState icon="🔔" title={t('consumer.notificationsEmpty')} message={t('consumer.notificationsEmptyDetail')} /> : <View style={styles.listings}>
         {notifications.map((item) => <View key={item.id} style={styles.activityCard}>
           <Text style={styles.productName}>{t(('consumer.notification.' + item.event) as never)}</Text>
-          {item.request ? <><Text style={styles.quantity}>{item.request.listingName} · {t(('consumer.requestStatus.' + item.request.status) as never)}</Text><Pressable accessibilityRole="button" onPress={() => { router.setParams({ section: 'requests', requestId: item.request!.id }); setSection('requests'); void refreshBuyerActivity(); }} style={styles.detailsButton}><Text style={styles.detailsText}>{t('consumer.viewRequest')}</Text></Pressable></> : null}
+          {item.request ? <><Text style={styles.quantity}>{localizedProduceName(item.request.listingName, item.request.listingNameTranslations, language)} · {t(('consumer.requestStatus.' + item.request.status) as never)}</Text><Pressable accessibilityRole="button" onPress={() => { router.setParams({ section: 'requests', requestId: item.request!.id }); setSection('requests'); void refreshBuyerActivity(); }} style={styles.detailsButton}><Text style={styles.detailsText}>{t('consumer.viewRequest')}</Text></Pressable></> : null}
           {item.request?.farmerContact ? <Pressable accessibilityRole="button" onPress={() => callFarmer(item.request!.farmerContact!.phone)}><Text style={styles.secondaryText}>{t('consumer.callFarmer').replace('{phone}', item.request.farmerContact.phone)}</Text></Pressable> : null}
           {!item.readAt ? <Pressable accessibilityRole="button" onPress={() => void markRead(item.id)} style={styles.secondary}><Text style={styles.secondaryText}>{t('consumer.markRead')}</Text></Pressable> : null}
         </View>)}

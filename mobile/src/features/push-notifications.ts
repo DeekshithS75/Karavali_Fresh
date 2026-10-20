@@ -6,13 +6,17 @@ import { AndroidImportance } from 'expo-notifications';
 import { registerConsumerPushToken } from '@/features/consumer-auth/client';
 import { registerFarmerPushToken } from '@/features/farmer-auth/client';
 
-export async function registerAccountForPush(role: 'farmer' | 'consumer') {
+export async function registerAccountForPush(role: 'farmer' | 'consumer', language: 'en' | 'kn' | 'tcy' = 'en') {
   if (Platform.OS === 'web') return 'unsupported_platform' as const;
   if (!Device.isDevice) return 'unavailable' as const;
   try {
     if (Platform.OS === 'android') await Notifications.setNotificationChannelAsync('requests', {
       name: 'Produce requests', importance: AndroidImportance.HIGH, vibrationPattern: [0, 250, 250, 250],
     });
+    if (role === 'farmer') await Notifications.setNotificationCategoryAsync('produce-request', [
+      { identifier: 'accept', buttonTitle: language === 'kn' ? 'ಒಪ್ಪಿಕೊಳ್ಳಿ' : 'Accept', options: { opensAppToForeground: true } },
+      { identifier: 'decline', buttonTitle: language === 'kn' ? 'ನಿರಾಕರಿಸಿ' : 'Decline', options: { opensAppToForeground: true, isDestructive: true } },
+    ]);
     const current = await Notifications.getPermissionsAsync();
     const permission = current.status === 'granted' ? current : await Notifications.requestPermissionsAsync();
     if (permission.status !== 'granted') return 'denied' as const;

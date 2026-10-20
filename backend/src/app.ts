@@ -16,6 +16,8 @@ import { marketPriceProvider, MarketPriceProviderError, marketRecordKey, matches
 import { buildFarmerMarketComparison, previousArrivalDate, type FarmerProduceForMarket } from './services/market-comparison.js';
 import { createConsumerSession, findAuthenticatedConsumer, hashConsumerPassword, verifyConsumerPassword } from './services/consumer-auth.js';
 import { sendAccountPush } from './services/push-notifications.js';
+import { notificationCopy } from './services/notification-copy.js';
+import { normalizeCommodityName, resolveOfficialCommodity } from './providers/market-commodities.js';
 
 const app = express();
 const upload = multer({
@@ -206,6 +208,15 @@ app.get('/api/consumer/auth/session', async (request, response) => {
   try {
     const { session, consumer } = await findAuthenticatedConsumer(request.header('authorization'));
     return response.json({ valid: true, role: 'consumer', consumerId: String(consumer._id), fullName: consumer.fullName, expiresAt: session.expiresAt });
+  } catch (error) { return sendError(response, error); }
+});
+
+app.patch('/api/consumer/profile/language', async (request, response) => {
+  try {
+    const { consumer } = await findAuthenticatedConsumer(request.header('authorization'));
+    const { language } = z.object({ language: z.enum(['en', 'kn', 'tcy']) }).parse(request.body);
+    await ConsumerModel.updateOne({ _id: consumer._id }, { $set: { preferredLanguage: language } }).exec();
+    return response.json({ language });
   } catch (error) { return sendError(response, error); }
 });
 
@@ -454,14 +465,23 @@ app.get('/api/farmer/profile', async (request, response) => {
   try {
     const session = await findAuthenticatedSession(request.header('authorization'));
     const farmer = await FarmerModel.findById(session.farmerId)
-      .select('fullName accountStatus phoneVerificationStatus documentComparisonStatus')
+      .select('fullName preferredLanguage accountStatus phoneVerificationStatus documentComparisonStatus')
       .lean()
-      .exec() as { fullName: string; accountStatus: string; phoneVerificationStatus: string; documentComparisonStatus: string } | null;
+      .exec() as { fullName: string; preferredLanguage?: 'en' | 'kn' | 'tcy'; accountStatus: string; phoneVerificationStatus: string; documentComparisonStatus: string } | null;
     if (!farmer) throw new ApiError(404, 'farmer_not_found');
     if (farmer.accountStatus !== 'active' || farmer.phoneVerificationStatus !== 'verified' || farmer.documentComparisonStatus !== 'passed') {
       throw new ApiError(401, 'invalid_session');
     }
-    return response.json({ profile: { fullName: farmer.fullName } });
+    return response.json({ profile: { fullName: farmer.fullName, preferredLanguage: farmer.preferredLanguage ?? 'en' } });
+  } catch (error) { return sendError(response, error); }
+});
+
+app.patch('/api/farmer/profile/language', async (request, response) => {
+  try {
+    const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
+    const { language } = z.object({ language: z.enum(['en', 'kn', 'tcy']) }).parse(request.body);
+    await FarmerModel.updateOne({ _id: farmer._id }, { $set: { preferredLanguage: language } }).exec();
+    return response.json({ language });
   } catch (error) { return sendError(response, error); }
 });
 
@@ -560,7 +580,7 @@ app.get('/api/consumer/produce', async (request, response) => {
 
 app.get('/api/consumer/produce/:produceId', async (request, response) => {
   try {
-    await findAuthenticatedConsumer(request.header('authorization'));
+    const { consumer } = await findAuthenticatedConsumer(request.header('authorization'));
     if (!Types.ObjectId.isValid(request.params.produceId)) throw new ApiError(404, 'produce_not_available');
     const record = await ProduceModel.findOne({
       _id: request.params.produceId, status: 'published', quantity: { $gt: 0 }, pricePerUnit: { $gt: 0 },
@@ -572,6 +592,8 @@ app.get('/api/consumer/produce/:produceId', async (request, response) => {
     } | null;
     if (!record) throw new ApiError(404, 'produce_not_available');
     const farmer = await FarmerModel.findById(record.farmerId).select('fullName').lean().exec() as { fullName: string } | null;
+    const commodityKey = resolveOfficialCommodity([record.name, ...Object.values(record.nameTranslations ?? {})]) ?? normalizeCommodityName(record.name);
+    const previousRequest = await ProduceRequestModel.findOne({ buyerId: consumer._id, farmerId: record.farmerId, commodityKey, status: { $in: ['pending', 'accepted'] } }).sort({ createdAt: -1 }).lean().exec() as { _id: Types.ObjectId; status: string } | null;
     let marketComparison: unknown = null;
     try { marketComparison = await createMarketComparison({ name: record.name, nameTranslations: record.nameTranslations, unit: record.priceUnit as FarmerProduceForMarket['unit'], pricePerUnit: record.pricePerUnit }); }
     catch { /* The client displays an explicit unavailable state. */ }
@@ -581,6 +603,7 @@ app.get('/api/consumer/produce/:produceId', async (request, response) => {
       quantity: record.quantity, unit: record.unit, pricePerUnit: record.pricePerUnit, priceUnit: record.priceUnit,
       farmerName: farmer?.fullName ?? null, marketComparison,
       photoUrls: record.photos.map((_photo, index) => `/api/consumer/produce/${String(record._id)}/photos/${index}`),
+      existingRequest: previousRequest ? { id: String(previousRequest._id), status: previousRequest.status } : null,
     } });
   } catch (error) { return sendError(response, error); }
 });
@@ -601,7 +624,7 @@ app.get('/api/consumer/produce/:produceId/photos/:photoIndex', async (request, r
 });
 
 async function formatBuyerRequest(record: {
-  _id: Types.ObjectId; listingId: Types.ObjectId; farmerId: Types.ObjectId; listingName: string;
+  _id: Types.ObjectId; listingId: Types.ObjectId; farmerId: Types.ObjectId; listingName: string; listingNameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>;
   listingPricePerUnit: number; listingPriceUnit: string; requestedQuantity: number; unit: string;
   status: string; createdAt: Date; decidedAt?: Date | null;
 }, includeContact: boolean) {
@@ -611,7 +634,7 @@ async function formatBuyerRequest(record: {
     if (farmer) farmerContact = { name: farmer.fullName, phone: farmer.phone };
   }
   return {
-    id: String(record._id), listingId: String(record.listingId), listingName: record.listingName,
+    id: String(record._id), listingId: String(record.listingId), listingName: record.listingName, ...(record.listingNameTranslations ? { listingNameTranslations: record.listingNameTranslations } : {}),
     pricePerUnit: record.listingPricePerUnit, priceUnit: record.listingPriceUnit,
     requestedQuantity: record.requestedQuantity, unit: record.unit, status: record.status,
     createdAt: record.createdAt, decidedAt: record.decidedAt ?? null, ...(farmerContact ? { farmerContact } : {}),
@@ -640,14 +663,17 @@ app.post('/api/consumer/produce/:produceId/requests', async (request, response) 
         const listing = await ProduceModel.findOneAndUpdate({
           _id: request.params.produceId, status: 'published', quantity: { $gt: 0 },
           pricePerUnit: { $gt: 0 }, priceUnit: { $in: ['kg', 'quintal', 'bunch', 'pieces'] },
-        }, { $inc: { requestVersion: 1 } }, { new: true, session }).select('farmerId name unit quantity pricePerUnit priceUnit').lean().exec() as {
-          farmerId: Types.ObjectId; name: string; unit: string; quantity: number; pricePerUnit: number; priceUnit: string;
+        }, { $inc: { requestVersion: 1 } }, { new: true, session }).select('farmerId name nameTranslations unit quantity pricePerUnit priceUnit').lean().exec() as {
+          farmerId: Types.ObjectId; name: string; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; unit: string; quantity: number; pricePerUnit: number; priceUnit: string;
         } | null;
         if (!listing) throw new ApiError(409, 'produce_not_available');
         if (requestedQuantity > listing.quantity) throw new ApiError(409, 'produce_request_quantity_exceeds_available');
+        const commodityKey = resolveOfficialCommodity([listing.name, ...Object.values(listing.nameTranslations ?? {})]) ?? normalizeCommodityName(listing.name);
+        const activeRequest = await ProduceRequestModel.findOne({ buyerId: consumer._id, farmerId: listing.farmerId, commodityKey, status: { $in: ['pending', 'accepted'] } }).session(session).lean().exec();
+        if (activeRequest) throw new ApiError(409, 'produce_request_already_active');
         const [created] = await ProduceRequestModel.create([{
           buyerId: consumer._id, listingId: new Types.ObjectId(request.params.produceId), farmerId: listing.farmerId,
-          listingName: listing.name, listingPricePerUnit: listing.pricePerUnit, listingPriceUnit: listing.priceUnit,
+          listingName: listing.name, listingNameTranslations: listing.nameTranslations, commodityKey, listingPricePerUnit: listing.pricePerUnit, listingPriceUnit: listing.priceUnit,
           requestedQuantity, requestKey, unit: listing.unit, status: 'pending',
         }], { session });
         const [notice] = await NotificationModel.create([{
@@ -657,9 +683,20 @@ app.post('/api/consumer/produce/:produceId/requests', async (request, response) 
         saved = created!.toObject() as typeof saved;
       });
     } finally { await session.endSession(); }
-    void sendAccountPush('farmer', saved!.farmerId, { title: 'New produce request', body: 'A buyer sent a produce request. Open Karavali Fresh to review it.', url: '/farmer/notifications?notificationId=' + noticeId, notificationId: noticeId, requestId: String(saved!._id) });
+    const farmerLanguage = await FarmerModel.findById(saved!.farmerId).select('preferredLanguage').lean().exec() as { preferredLanguage?: 'en' | 'kn' | 'tcy' } | null;
+    const buyerDisplayName = (await ConsumerModel.findById(consumer._id).select('fullName').lean().exec() as { fullName?: string } | null)?.fullName;
+    const copy = notificationCopy(farmerLanguage?.preferredLanguage, 'request_created', { buyerName: buyerDisplayName, vegetableName: saved!.listingName, quantity: saved!.requestedQuantity, unit: saved!.unit });
+    void sendAccountPush('farmer', saved!.farmerId, { ...copy, url: '/farmer/requests?requestId=' + String(saved!._id), notificationId: noticeId, requestId: String(saved!._id), categoryId: 'produce-request' });
     return response.status(201).json({ request: await formatBuyerRequest(saved!, false) });
   } catch (error) {
+    if (buyerId && error instanceof Error && 'code' in error && error.code === 11000) {
+      const listing = Types.ObjectId.isValid(request.params.produceId) ? await ProduceModel.findById(request.params.produceId).select('farmerId name nameTranslations').lean().exec() as { farmerId: Types.ObjectId; name: string; nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>> } | null : null;
+      if (listing) {
+        const commodityKey = resolveOfficialCommodity([listing.name, ...Object.values(listing.nameTranslations ?? {})]) ?? normalizeCommodityName(listing.name);
+        const duplicate = await ProduceRequestModel.findOne({ buyerId, farmerId: listing.farmerId, commodityKey, status: { $in: ['pending', 'accepted'] } }).lean().exec();
+        if (duplicate) return response.status(409).json({ error: 'produce_request_already_active' });
+      }
+    }
     if (buyerId && requestKey && error instanceof Error && 'code' in error && error.code === 11000) {
       const existing = await ProduceRequestModel.findOne({ buyerId, requestKey }).lean().exec() as unknown as Parameters<typeof formatBuyerRequest>[0] | null;
       if (existing) return response.status(200).json({ request: await formatBuyerRequest(existing, false) });
@@ -672,7 +709,7 @@ app.get('/api/consumer/requests', async (request, response) => {
   try {
     const { consumer } = await findAuthenticatedConsumer(request.header('authorization'));
     const records = await ProduceRequestModel.find({ buyerId: consumer._id }).sort({ createdAt: -1 }).limit(100).lean().exec() as unknown as Array<{
-      _id: Types.ObjectId; listingId: Types.ObjectId; farmerId: Types.ObjectId; listingName: string; listingPricePerUnit: number; listingPriceUnit: string; requestedQuantity: number; unit: string; status: string; createdAt: Date; decidedAt?: Date | null;
+      _id: Types.ObjectId; listingId: Types.ObjectId; farmerId: Types.ObjectId; listingName: string; listingNameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; listingPricePerUnit: number; listingPriceUnit: string; requestedQuantity: number; unit: string; status: string; createdAt: Date; decidedAt?: Date | null;
     }>;
     return response.json({ items: await Promise.all(records.map((record) => formatBuyerRequest(record, true))) });
   } catch (error) { return sendError(response, error); }
@@ -682,14 +719,14 @@ app.get('/api/farmer/requests', async (request, response) => {
   try {
     const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
     const items = await ProduceRequestModel.find({ farmerId: farmer._id }).sort({ createdAt: -1 }).limit(100).lean().exec() as unknown as Array<{
-      _id: Types.ObjectId; buyerId: Types.ObjectId; listingId: Types.ObjectId; listingName: string; requestedQuantity: number; unit: string; status: string; createdAt: Date; decidedAt?: Date | null;
+      _id: Types.ObjectId; buyerId: Types.ObjectId; listingId: Types.ObjectId; listingName: string; listingNameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; listingPricePerUnit: number; listingPriceUnit: string; requestedQuantity: number; unit: string; status: string; createdAt: Date; decidedAt?: Date | null;
     }>;
     const buyerIds = [...new Set(items.map((item) => String(item.buyerId)))];
     const buyers = buyerIds.length ? await ConsumerModel.find({ _id: { $in: buyerIds } }).select('_id fullName').lean().exec() as unknown as Array<{ _id: Types.ObjectId; fullName: string }> : [];
     const buyerNames = new Map(buyers.map((buyer) => [String(buyer._id), buyer.fullName]));
     return response.json({ items: items.map((item) => ({
-      id: String(item._id), listingId: String(item.listingId), listingName: item.listingName,
-      buyerName: buyerNames.get(String(item.buyerId)) ?? 'Buyer', requestedQuantity: item.requestedQuantity, unit: item.unit, status: item.status,
+      id: String(item._id), listingId: String(item.listingId), listingName: item.listingName, ...(item.listingNameTranslations ? { listingNameTranslations: item.listingNameTranslations } : {}),
+      buyerName: buyerNames.get(String(item.buyerId)) ?? 'Buyer', pricePerUnit: item.listingPricePerUnit, priceUnit: item.listingPriceUnit, requestedQuantity: item.requestedQuantity, unit: item.unit, status: item.status,
       createdAt: item.createdAt, decidedAt: item.decidedAt ?? null,
     })) });
   } catch (error) { return sendError(response, error); }
@@ -708,7 +745,7 @@ app.patch('/api/farmer/requests/:requestId/decision', async (request, response) 
     let recipientId: Types.ObjectId | null = null;
     await transactionSession.withTransaction(async () => {
       const current = await ProduceRequestModel.findOne({ _id: request.params.requestId, farmerId: farmer._id }).session(transactionSession).lean().exec() as {
-        _id: Types.ObjectId; buyerId: Types.ObjectId; listingId: Types.ObjectId; farmerId: Types.ObjectId; listingName: string; requestedQuantity: number; unit: string; status: string;
+        _id: Types.ObjectId; buyerId: Types.ObjectId; listingId: Types.ObjectId; farmerId: Types.ObjectId; listingName: string; listingNameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; requestedQuantity: number; unit: string; status: string;
       } | null;
       if (!current) throw new ApiError(404, 'produce_request_not_found');
       recipientId = current.buyerId;
@@ -749,7 +786,11 @@ app.patch('/api/farmer/requests/:requestId/decision', async (request, response) 
       decidedStatus = decision;
     });
     // Notification persistence commits with the request. Push delivery is best effort.
-    if (recipientId) void sendAccountPush('consumer', recipientId, { title: 'Produce request update', body: 'Your produce request has been updated. Open Karavali Fresh to view it.', url: '/consumer?section=requests&requestId=' + request.params.requestId, notificationId: noticeId, requestId: request.params.requestId });
+    if (recipientId) {
+      const buyer = await ConsumerModel.findById(recipientId).select('preferredLanguage').lean().exec() as { preferredLanguage?: 'en' | 'kn' | 'tcy' } | null;
+      const copy = notificationCopy(buyer?.preferredLanguage, 'request_decided', { decision });
+      void sendAccountPush('consumer', recipientId, { ...copy, url: '/consumer?section=requests&requestId=' + request.params.requestId, notificationId: noticeId, requestId: request.params.requestId });
+    }
     return response.json({ status: decidedStatus });
   } catch (error) { return sendError(response, error); }
   finally { if (session) await session.endSession(); }
@@ -762,7 +803,7 @@ async function notificationsFor(role: 'consumer' | 'farmer', recipientId: Types.
     NotificationModel.countDocuments({ recipientRole: role, recipientId, readAt: null }),
   ]);
   const requests = await ProduceRequestModel.find({ _id: { $in: records.map((item) => item.requestId) } }).lean().exec() as unknown as Array<{
-    _id: Types.ObjectId; buyerId: Types.ObjectId; listingId: Types.ObjectId; farmerId: Types.ObjectId; listingName: string; listingPricePerUnit: number; listingPriceUnit: string; requestedQuantity: number; unit: string; status: string; createdAt: Date; decidedAt?: Date | null;
+    _id: Types.ObjectId; buyerId: Types.ObjectId; listingId: Types.ObjectId; farmerId: Types.ObjectId; listingName: string; listingNameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; listingPricePerUnit: number; listingPriceUnit: string; requestedQuantity: number; unit: string; status: string; createdAt: Date; decidedAt?: Date | null;
   }>;
   const requestById = new Map(requests.map((item) => [String(item._id), item]));
   const buyerIds = role === 'farmer' ? [...new Set(requests.map((item) => String(item.buyerId)))].filter((id) => id !== 'undefined') : [];
