@@ -12,6 +12,9 @@ function callStatusMessageKey(item: FarmerProduceRequest) {
   if (item.callFailureCode === 'provider_not_configured') return 'consumer.callStatus.providerNotConfigured';
   if (item.callFailureCode === 'participant_unavailable' || item.callFailureCode === 'participant_phone_invalid') return 'consumer.callStatus.participantUnavailable';
   if (item.callFailureCode === 'provider_rejected') return 'consumer.callStatus.providerRejected';
+  if (item.callFailureCode === 'provider_authentication_failed') return 'consumer.callStatus.providerAuthenticationFailed';
+  if (item.callFailureCode === 'provider_request_invalid') return 'consumer.callStatus.providerRequestInvalid';
+  if (item.callFailureCode === 'provider_rate_limited') return 'consumer.callStatus.providerRateLimited';
   if (item.callFailureCode === 'busy') return 'consumer.callStatus.busy';
   if (item.callFailureCode === 'no-answer') return 'consumer.callStatus.noAnswer';
   return 'consumer.callStatus.' + (item.callStatus ?? 'not_started');

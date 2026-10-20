@@ -7,7 +7,7 @@ import { notificationCopy } from './notification-copy.js';
 import { sendAccountPush } from './push-notifications.js';
 
 export type CallStatus = 'not_started' | 'queued' | 'initiated' | 'failed' | 'completed' | 'unavailable';
-export type CallFailureCode = 'provider_not_configured' | 'participant_unavailable' | 'participant_phone_invalid' | 'provider_rejected' | 'provider_unavailable' | 'response_invalid' | 'provider_response_unknown' | 'failed' | 'busy' | 'no-answer' | 'provider_failed';
+export type CallFailureCode = 'provider_not_configured' | 'participant_unavailable' | 'participant_phone_invalid' | 'provider_rejected' | 'provider_authentication_failed' | 'provider_request_invalid' | 'provider_rate_limited' | 'provider_unavailable' | 'response_invalid' | 'provider_response_unknown' | 'failed' | 'busy' | 'no-answer' | 'provider_failed';
 
 type AcceptedRequest = { _id: Types.ObjectId; buyerId: Types.ObjectId; farmerId: Types.ObjectId; status: string };
 type CallParticipant = { _id: Types.ObjectId; preferredLanguage?: 'en' | 'kn' | 'tcy'; phoneCiphertext?: string };
@@ -49,6 +49,7 @@ export async function initiateAcceptedRequestCall(requestId: Types.ObjectId, far
   if (!attempt) return { status: 'unavailable' as const, confirmed: false };
 
   if (!isExotelCallConfigured()) {
+    logCallFailure(String(attempt._id), { stage: 'configuration', code: 'provider_not_configured' });
     const changed = await CallAttemptModel.updateOne({ _id: attempt._id, status: 'queued' }, { $set: { status: 'failed', failureCode: 'provider_not_configured', completedAt: new Date() }, $unset: { activeRequestId: 1 } }).exec();
     if (changed.modifiedCount) await notifyParticipants(request, 'call_failed', 'provider_not_configured');
     return { status: 'unavailable' as const, confirmed: false, failureCode: 'provider_not_configured' as const };
@@ -79,8 +80,11 @@ export async function initiateAcceptedRequestCall(requestId: Types.ObjectId, far
     });
   } catch (error) {
     const ambiguous = error instanceof ExotelCallError && error.ambiguous;
+    const failureCode = error instanceof ExotelCallError ? error.code : 'provider_unavailable';
+    logCallFailure(String(attempt._id), error instanceof ExotelCallError
+      ? { ...error.diagnostic, code: error.code }
+      : { stage: 'provider_request', code: failureCode });
     if (!ambiguous) {
-      const failureCode = error instanceof ExotelCallError ? error.code : 'provider_unavailable';
       const changed = await CallAttemptModel.updateOne({ _id: attempt._id, status: 'queued' }, { $set: { status: 'failed', failureCode, completedAt: new Date() }, $unset: { activeRequestId: 1 } }).exec();
       if (changed.modifiedCount) await notifyParticipants(request, 'call_failed', failureCode);
       return { status: 'failed' as const, confirmed: false, failureCode: failureCode as CallFailureCode };
@@ -100,6 +104,11 @@ export async function initiateAcceptedRequestCall(requestId: Types.ObjectId, far
   else if (changed.modifiedCount && current?.status === 'initiated') await notifyParticipants(request, 'call_initiated');
   else if (changed.modifiedCount && current?.status === 'queued' && current.providerReference) await notifyParticipants(request, 'call_queued');
   return { status: current?.status ?? 'queued', confirmed: Boolean(current?.providerReference), failureCode: current?.failureCode as CallFailureCode | undefined ?? null };
+}
+
+function logCallFailure(correlationId: string, diagnostic: { stage: string; code: string; httpStatus?: number; providerCode?: string; providerMessage?: string }) {
+  // Provider text is already sanitized in the provider adapter. Never log request bodies, headers or phone values.
+  process.stderr.write(`${JSON.stringify({ event: 'exotel_call_initiation_failed', correlationId, ...diagnostic })}\n`);
 }
 
 export async function retryAcceptedRequestCall(requestId: Types.ObjectId, farmerId: Types.ObjectId) {
