@@ -136,6 +136,8 @@ const produceRequestSchema = new Schema({
   requestedQuantity: { type: Number, required: true, min: Number.MIN_VALUE, max: 1_000_000_000 },
   requestKey: { type: String, maxlength: 80 },
   callConsentAt: { type: Date },
+  buyerSharedPhoneAt: { type: Date, default: null },
+  farmerSharedPhoneAt: { type: Date, default: null },
   unit: { type: String, enum: ['kg', 'quintal', 'bunch', 'pieces'], required: true },
   status: { type: String, enum: ['pending', 'accepted', 'rejected', 'cancelled'], required: true, default: 'pending', index: true },
   decidedAt: { type: Date, default: null },
@@ -179,6 +181,20 @@ callAttemptSchema.index({ requestId: 1, attempt: 1 }, { unique: true });
 callAttemptSchema.index({ activeRequestId: 1 }, { unique: true, sparse: true });
 callAttemptSchema.index({ providerReference: 1 }, { unique: true, sparse: true });
 
+const inAppCallSchema = new Schema({
+  requestId: { type: Schema.Types.ObjectId, ref: 'ProduceRequest', required: true, index: true },
+  activeRequestId: { type: Schema.Types.ObjectId, select: false },
+  roomName: { type: String, required: true, unique: true, maxlength: 100 },
+  callerFarmerId: { type: Schema.Types.ObjectId, required: true },
+  buyerId: { type: Schema.Types.ObjectId, required: true },
+  status: { type: String, enum: ['ringing', 'connected', 'ended', 'expired'], required: true, index: true },
+  farmerJoinedAt: { type: Date },
+  buyerJoinedAt: { type: Date },
+  expiresAt: { type: Date, required: true },
+  endedAt: { type: Date },
+}, { timestamps: true, strict: 'throw' });
+inAppCallSchema.index({ activeRequestId: 1 }, { unique: true, sparse: true });
+
 const marketPriceObservationSchema = new Schema({
   recordKey: { type: String, required: true },
   state: { type: String, required: true },
@@ -210,4 +226,5 @@ export const ProduceRequestModel = mongoose.models.ProduceRequest ?? mongoose.mo
 export const NotificationModel = mongoose.models.Notification ?? mongoose.model('Notification', notificationSchema);
 export const PushTokenModel = mongoose.models.PushToken ?? mongoose.model('PushToken', pushTokenSchema);
 export const CallAttemptModel = mongoose.models.CallAttempt ?? mongoose.model('CallAttempt', callAttemptSchema);
+export const InAppCallModel = mongoose.models.InAppCall ?? mongoose.model('InAppCall', inAppCallSchema);
 export const MarketPriceObservationModel = mongoose.models.MarketPriceObservation ?? mongoose.model('MarketPriceObservation', marketPriceObservationSchema);

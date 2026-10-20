@@ -6,6 +6,9 @@ import mongoose, { Types } from 'mongoose';
 
 process.env.NODE_ENV = 'development';
 process.env.TOKEN_HMAC_SECRET = 'request-workflow-test-token-secret'.padEnd(64, 'x');
+process.env.LIVEKIT_URL = 'wss://request-tests.livekit.cloud';
+process.env.LIVEKIT_API_KEY = 'request-test-livekit-key';
+process.env.LIVEKIT_API_SECRET = 'request-test-livekit-secret';
 
 const [{ default: app }, models, { hmac }] = await Promise.all([
   import('../src/app.js'), import('../src/models/index.js'), import('../src/crypto.js'),
@@ -47,6 +50,19 @@ async function server(context: TestContext) {
     for (const key of Object.keys(update.$unset ?? {})) delete item[key];
     return { modifiedCount: 1 };
   }) as never);
+  context.mock.method(models.InAppCallModel, 'findOne', (filter: Record<string, any>) => query(() => db.inAppCalls.find((item) => String(item.activeRequestId) === String(filter.activeRequestId)) ?? null) as never);
+  context.mock.method(models.InAppCallModel, 'create', async (records: Array<Record<string, any>>) => records.map((record) => {
+    const saved = { _id: new Types.ObjectId(), ...record };
+    db.inAppCalls.push(saved);
+    return saved;
+  }) as never);
+  context.mock.method(models.InAppCallModel, 'updateOne', (filter: Record<string, any>, update: Record<string, any>) => query(() => {
+    const item = db.inAppCalls.find((record) => String(record._id) === String(filter._id));
+    if (!item) return { modifiedCount: 0 };
+    Object.assign(item, update.$set ?? {});
+    for (const key of Object.keys(update.$unset ?? {})) delete item[key];
+    return { modifiedCount: 1 };
+  }) as never);
   context.mock.method(models.SessionModel, 'findOne', async (query: { tokenHash: string }) => query.tokenHash === hmac(farmerToken)
     ? { farmerId, revokedAt: null, expiresAt: new Date(Date.now() + 60_000) } : null);
   context.mock.method(models.FarmerModel, 'findById', () => ({
@@ -60,6 +76,7 @@ async function server(context: TestContext) {
     requests: [] as Array<Record<string, any>>,
     notifications: [] as Array<Record<string, any>>,
     callAttempts: [] as Array<Record<string, any>>,
+    inAppCalls: [] as Array<Record<string, any>>,
     extraListings: new Set<string>(),
     extraListingFarmers: new Map<string, Types.ObjectId>(),
   };
@@ -217,7 +234,7 @@ test('accept/reject decisions are owner-scoped, deduct once, and zero stock unpu
   assert.equal(db.requests[1]!.status, 'cancelled');
 });
 
-test('acceptance does not call automatically; farmer explicitly starts and retries the call while request stays accepted', async (context) => {
+test('acceptance does not call automatically; farmer starts an in-app room while request stays accepted', async (context) => {
   const { call, db } = await server(context);
   const request = { _id: new Types.ObjectId(), buyerId, listingId, farmerId, listingName: 'Tomato', requestedQuantity: 1, unit: 'kg', status: 'pending' };
   db.requests.push(request);
@@ -231,17 +248,19 @@ test('acceptance does not call automatically; farmer explicitly starts and retri
   assert.equal((await call('/api/farmer/requests/' + requestId + '/call', 'buyer', undefined, 'POST')).status, 401);
   const started = await call('/api/farmer/requests/' + requestId + '/call', 'farmer', undefined, 'POST');
   assert.equal(started.status, 200);
-  assert.equal((await started.json() as { status: string }).status, 'failed');
+  assert.equal((await started.json() as { status: string }).status, 'ringing');
   assert.equal(request.status, 'accepted');
-  assert.equal(db.callAttempts.length, 1);
+  assert.equal(db.callAttempts.length, 0);
+  assert.equal(db.inAppCalls.length, 1);
 
   const duplicate = await call('/api/farmer/requests/' + requestId + '/call', 'farmer', undefined, 'POST');
   assert.equal(duplicate.status, 200);
-  assert.equal(db.callAttempts.length, 1);
+  assert.equal(db.callAttempts.length, 0);
   const retry = await call('/api/farmer/requests/' + requestId + '/call/retry', 'farmer', undefined, 'POST');
   assert.equal(retry.status, 200);
   assert.equal(request.status, 'accepted');
-  assert.equal(db.callAttempts.length, 2);
+  assert.equal(db.callAttempts.length, 0);
+  assert.equal(db.inAppCalls.length, 1);
 });
 
 test('concurrent acceptances do not oversell and buyer request responses never expose farmer phone numbers', async (context) => {

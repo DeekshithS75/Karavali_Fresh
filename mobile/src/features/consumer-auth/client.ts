@@ -52,6 +52,7 @@ export type ConsumerProduceRequest = {
   id: string; listingId: string; listingName: string; listingNameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; pricePerUnit: number; priceUnit: string;
   requestedQuantity: number; unit: string; status: 'pending' | 'accepted' | 'rejected' | 'cancelled';
   createdAt: string; decidedAt: string | null; callStatus?: 'not_started' | 'queued' | 'initiated' | 'failed' | 'completed' | 'unavailable'; callConfirmed?: boolean;
+  ownPhoneShared?: boolean; sharedPhone?: string | null;
 };
 
 export type ConsumerNotification = {
@@ -121,6 +122,18 @@ export async function setConsumerPreferredLanguage(language: 'en' | 'kn' | 'tcy'
   return request<{ language: 'en' | 'kn' | 'tcy' }>('/api/consumer/profile/language', { method: 'PATCH', headers: { Authorization: `Bearer ${tokens.accessToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ language }) });
 }
 
+export async function joinConsumerInAppCall(sessionId: string) {
+  const tokens = await storage.read();
+  if (!tokens) throw new ConsumerAuthError('unauthorized');
+  return request<{ serverUrl: string; participantToken: string; status: string }>(`/api/consumer/calls/${encodeURIComponent(sessionId)}/join`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.accessToken}` } });
+}
+
+export async function endConsumerInAppCall(sessionId: string) {
+  const tokens = await storage.read();
+  if (!tokens) throw new ConsumerAuthError('unauthorized');
+  return request<{ status: 'ended' }>(`/api/consumer/calls/${encodeURIComponent(sessionId)}/end`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.accessToken}` } });
+}
+
 export async function logoutConsumer() {
   const tokens = await storage.read();
   try {
@@ -186,6 +199,12 @@ export async function getConsumerRequests() {
   const tokens = await storage.read();
   if (!tokens) throw new ConsumerAuthError('unauthorized');
   return request<{ items: ConsumerProduceRequest[] }>('/api/consumer/requests', { headers: { Authorization: 'Bearer ' + tokens.accessToken } });
+}
+
+export async function shareConsumerRequestPhone(requestId: string) {
+  const tokens = await storage.read();
+  if (!tokens) throw new ConsumerAuthError('unauthorized');
+  return request<{ shared: true }>(`/api/consumer/requests/${encodeURIComponent(requestId)}/share-phone`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.accessToken}` } });
 }
 
 export async function getConsumerNotifications(page = 1) {

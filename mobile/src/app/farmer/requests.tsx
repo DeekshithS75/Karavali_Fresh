@@ -1,9 +1,9 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { FarmerDashboardGuard } from '@/components/farmer-auth-flow';
 import { EmptyState, MarketColors, ScreenFrame, SectionHeading } from '@/components/marketplace-ui';
-import { FarmerAuthError, decideFarmerProduceRequest, getFarmerNotifications, getFarmerRequests, markFarmerNotificationRead, retryFarmerRequestCall, startFarmerRequestCall, type FarmerProduceRequest } from '@/features/farmer-auth/client';
+import { FarmerAuthError, decideFarmerProduceRequest, getFarmerNotifications, getFarmerRequests, markFarmerNotificationRead, retryFarmerRequestCall, shareFarmerRequestPhone, startFarmerRequestCall, type FarmerProduceRequest } from '@/features/farmer-auth/client';
 import { useLanguage } from '@/localization/LanguageProvider';
 import { localizedProduceName } from '@/localization/produce-name';
 
@@ -28,6 +28,7 @@ export default function FarmerRequestsScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [callError, setCallError] = useState<string | null>(null);
+  const [sharingPhoneId, setSharingPhoneId] = useState<string | null>(null);
   const callActionRef = useRef<string | null>(null);
 
   const load = useCallback(async () => {
@@ -68,6 +69,21 @@ export default function FarmerRequestsScreen() {
     return () => { active = false; clearInterval(timer); };
   }, [items]);
 
+  const hasAcceptedRequests = items.some((item) => item.status === 'accepted');
+  useEffect(() => {
+    if (!hasAcceptedRequests) return undefined;
+    let active = true;
+    const timer = setInterval(() => {
+      if (AppState.currentState !== 'active') return;
+      void getFarmerRequests().then((response) => {
+        if (active) setItems(response.items);
+      }).catch((reason) => {
+        if (active && reason instanceof FarmerAuthError && reason.code === 'unauthorized') router.replace('/auth/farmer');
+      });
+    }, 10_000);
+    return () => { active = false; clearInterval(timer); };
+  }, [hasAcceptedRequests]);
+
   const decide = (item: FarmerProduceRequest, decision: 'accepted' | 'rejected') => {
     Alert.alert(t(decision === 'accepted' ? 'farmer.requests.acceptTitle' : 'farmer.requests.rejectTitle'), t('farmer.requests.confirm').replace('{name}', item.listingName), [
       { text: t('produce.deleteCancel'), style: 'cancel' },
@@ -85,13 +101,25 @@ export default function FarmerRequestsScreen() {
     setCallError(null);
     const retry = item.callStatus === 'failed' || Boolean(item.callFailureCode);
     void (retry ? retryFarmerRequestCall(item.id) : startFarmerRequestCall(item.id))
-      .then(load)
+      .then(({ sessionId }) => router.push({ pathname: '/call', params: { sessionId, role: 'farmer' } }))
       .catch((reason) => {
         if (reason instanceof FarmerAuthError && reason.code === 'unauthorized') router.replace('/auth/farmer');
         else setCallError(reason instanceof FarmerAuthError && ['network', 'apiUrlMissing', 'urlNotAllowed'].includes(reason.code)
           ? 'farmer.requests.callConnectionError' : 'farmer.requests.callError');
       })
       .finally(() => { callActionRef.current = null; setBusyId(null); });
+  };
+
+  const sharePhone = async (item: FarmerProduceRequest) => {
+    setSharingPhoneId(item.id);
+    try { await shareFarmerRequestPhone(item.id); await load(); }
+    catch { Alert.alert(t('contact.error' as never)); }
+    finally { setSharingPhoneId(null); }
+  };
+
+  const dialSharedPhone = async (phone: string) => {
+    try { await Linking.openURL(`tel:${phone}`); }
+    catch { Alert.alert(t('contact.error' as never)); }
   };
 
   return <FarmerDashboardGuard><ScreenFrame>
@@ -107,6 +135,8 @@ export default function FarmerRequestsScreen() {
         <Text style={styles.status}>{t(('farmer.requests.status.' + item.status) as never)}</Text>
         {item.status === 'accepted' ? <>
           <Text style={styles.body}>{t(callStatusMessageKey(item) as never)}</Text>
+          {item.sharedPhone ? <Pressable accessibilityRole="button" onPress={() => void dialSharedPhone(item.sharedPhone!)} style={styles.button}><Text style={styles.buttonText}>{t('contact.call' as never)} {item.sharedPhone}</Text></Pressable> : null}
+          <Pressable accessibilityRole="button" disabled={Boolean(busyId) || item.ownPhoneShared} onPress={() => void sharePhone(item)} style={styles.button}><Text style={styles.buttonText}>{t(item.ownPhoneShared ? 'contact.shared' as never : sharingPhoneId === item.id ? 'farmer.requests.working' as never : 'contact.share' as never)}</Text></Pressable>
           {item.callStatus === 'not_started' || item.callStatus === 'failed' || item.callStatus === 'unavailable' ? <Pressable accessibilityRole="button" disabled={Boolean(busyId)} onPress={() => callBuyer(item)} style={styles.button}><Text style={styles.buttonText}>{t(busyId === item.id ? 'farmer.requests.working' : item.callStatus === 'failed' || Boolean(item.callFailureCode) ? 'farmer.requests.retryCall' : 'farmer.requests.callBuyer')}</Text></Pressable> : null}
         </> : null}
         {item.status === 'pending' ? <View style={styles.actions}>

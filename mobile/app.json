@@ -36,6 +36,13 @@
     },
     "plugins": [
       "expo-router",
+        "@livekit/react-native-expo-plugin",
+        [
+          "@config-plugins/react-native-webrtc",
+          {
+            "microphonePermission": "Allow Karavali Fresh to use your microphone during private in-app calls."
+          }
+        ],
       [
         "expo-location",
         {

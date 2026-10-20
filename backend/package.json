@@ -25,6 +25,7 @@
     "dotenv": "^16.4.7",
     "express": "^5.1.0",
     "helmet": "^8.1.0",
+    "livekit-server-sdk": "^2.19.1",
     "mongoose": "^8.12.1",
     "multer": "^2.0.2",
     "sharp": "^0.35.5",

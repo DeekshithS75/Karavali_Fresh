@@ -18,7 +18,8 @@ import { createConsumerSession, findAuthenticatedConsumer } from './services/con
 import { sendAccountPush } from './services/push-notifications.js';
 import { notificationCopy } from './services/notification-copy.js';
 import { normalizeCommodityName, resolveOfficialCommodity } from './providers/market-commodities.js';
-import { applyExotelCallStatus, initiateAcceptedRequestCall, latestRequestCallStatus, retryAcceptedRequestCall } from './services/accepted-request-calls.js';
+import { applyExotelCallStatus, latestRequestCallStatus } from './services/accepted-request-calls.js';
+import { endMemberInAppCall, joinInAppCall, startAcceptedInAppCall } from './services/in-app-calls.js';
 
 const app = express();
 const upload = multer({
@@ -699,6 +700,54 @@ async function formatBuyerRequest(record: {
   };
 }
 
+async function requestPhoneShare(record: {
+  _id: Types.ObjectId; buyerId: Types.ObjectId; farmerId: Types.ObjectId; status: string;
+  buyerSharedPhoneAt?: Date | null; farmerSharedPhoneAt?: Date | null;
+}, viewerRole: 'consumer' | 'farmer') {
+  const ownSharedAt = viewerRole === 'consumer' ? record.buyerSharedPhoneAt : record.farmerSharedPhoneAt;
+  const otherSharedAt = viewerRole === 'consumer' ? record.farmerSharedPhoneAt : record.buyerSharedPhoneAt;
+  let sharedPhone: string | null = null;
+  if (record.status === 'accepted' && otherSharedAt) {
+    if (viewerRole === 'consumer') {
+      const farmer = await FarmerModel.findById(record.farmerId).select('phone').lean().exec() as { phone?: string } | null;
+      sharedPhone = farmer?.phone ? normalizeIndianPhone(farmer.phone) : null;
+    } else {
+      const buyer = await ConsumerModel.findById(record.buyerId).select('+phoneCiphertext').lean().exec() as { phoneCiphertext?: string } | null;
+      if (buyer?.phoneCiphertext) {
+        try { sharedPhone = normalizeIndianPhone(decryptSecretValue(buyer.phoneCiphertext)); } catch { sharedPhone = null; }
+      }
+    }
+  }
+  return { ownPhoneShared: Boolean(ownSharedAt), sharedPhone };
+}
+
+async function shareRequestPhone(requestId: string, role: 'consumer' | 'farmer', participantId: Types.ObjectId) {
+  if (!Types.ObjectId.isValid(requestId)) throw new ApiError(404, 'produce_request_not_found');
+  const participantField = role === 'consumer' ? 'buyerId' : 'farmerId';
+  const shareField = role === 'consumer' ? 'buyerSharedPhoneAt' : 'farmerSharedPhoneAt';
+  const record = await ProduceRequestModel.findOneAndUpdate(
+    { _id: requestId, [participantField]: participantId, status: 'accepted' },
+    { $set: { [shareField]: new Date() } },
+    { new: true },
+  ).lean().exec();
+  if (!record) throw new ApiError(404, 'accepted_produce_request_not_found');
+  return { shared: true };
+}
+
+app.post('/api/consumer/requests/:requestId/share-phone', async (request, response) => {
+  try {
+    const { consumer } = await findAuthenticatedConsumer(request.header('authorization'));
+    return response.json(await shareRequestPhone(request.params.requestId, 'consumer', consumer._id));
+  } catch (error) { return sendError(response, error); }
+});
+
+app.post('/api/farmer/requests/:requestId/share-phone', async (request, response) => {
+  try {
+    const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
+    return response.json(await shareRequestPhone(request.params.requestId, 'farmer', farmer._id));
+  } catch (error) { return sendError(response, error); }
+});
+
 app.post('/api/consumer/produce/:produceId/requests', async (request, response) => {
   let buyerId: Types.ObjectId | null = null;
   let requestKey: string | undefined;
@@ -768,9 +817,9 @@ app.get('/api/consumer/requests', async (request, response) => {
   try {
     const { consumer } = await findAuthenticatedConsumer(request.header('authorization'));
     const records = await ProduceRequestModel.find({ buyerId: consumer._id }).sort({ createdAt: -1 }).limit(100).lean().exec() as unknown as Array<{
-      _id: Types.ObjectId; listingId: Types.ObjectId; farmerId: Types.ObjectId; listingName: string; listingNameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; listingPricePerUnit: number; listingPriceUnit: string; requestedQuantity: number; unit: string; status: string; createdAt: Date; decidedAt?: Date | null;
+      _id: Types.ObjectId; buyerId: Types.ObjectId; listingId: Types.ObjectId; farmerId: Types.ObjectId; listingName: string; listingNameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; listingPricePerUnit: number; listingPriceUnit: string; requestedQuantity: number; unit: string; status: string; createdAt: Date; decidedAt?: Date | null; buyerSharedPhoneAt?: Date | null; farmerSharedPhoneAt?: Date | null;
     }>;
-    return response.json({ items: await Promise.all(records.map((record) => formatBuyerRequest(record))) });
+    return response.json({ items: await Promise.all(records.map(async (record) => ({ ...await formatBuyerRequest(record), ...await requestPhoneShare(record, 'consumer') }))) });
   } catch (error) { return sendError(response, error); }
 });
 
@@ -778,7 +827,7 @@ app.get('/api/farmer/requests', async (request, response) => {
   try {
     const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
     const items = await ProduceRequestModel.find({ farmerId: farmer._id }).sort({ createdAt: -1 }).limit(100).lean().exec() as unknown as Array<{
-      _id: Types.ObjectId; buyerId: Types.ObjectId; listingId: Types.ObjectId; listingName: string; listingNameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; listingPricePerUnit: number; listingPriceUnit: string; requestedQuantity: number; unit: string; status: string; createdAt: Date; decidedAt?: Date | null;
+      _id: Types.ObjectId; buyerId: Types.ObjectId; listingId: Types.ObjectId; farmerId: Types.ObjectId; listingName: string; listingNameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; listingPricePerUnit: number; listingPriceUnit: string; requestedQuantity: number; unit: string; status: string; createdAt: Date; decidedAt?: Date | null; buyerSharedPhoneAt?: Date | null; farmerSharedPhoneAt?: Date | null;
     }>;
     const buyerIds = [...new Set(items.map((item) => String(item.buyerId)))];
     const buyers = buyerIds.length ? await ConsumerModel.find({ _id: { $in: buyerIds } }).select('_id fullName').lean().exec() as unknown as Array<{ _id: Types.ObjectId; fullName: string }> : [];
@@ -789,6 +838,7 @@ app.get('/api/farmer/requests', async (request, response) => {
       id: String(item._id), listingId: String(item.listingId), listingName: item.listingName, ...(item.listingNameTranslations ? { listingNameTranslations: item.listingNameTranslations } : {}),
       buyerName: buyerNames.get(String(item.buyerId)) ?? 'Buyer', pricePerUnit: item.listingPricePerUnit, priceUnit: item.listingPriceUnit, requestedQuantity: item.requestedQuantity, unit: item.unit, status: item.status,
       createdAt: item.createdAt, decidedAt: item.decidedAt ?? null, callStatus: call.status, callConfirmed: call.confirmed, callFailureCode: call.failureCode,
+      ...await requestPhoneShare(item, 'farmer'),
     });
     })) });
   } catch (error) { return sendError(response, error); }
@@ -862,7 +912,7 @@ app.post('/api/farmer/requests/:requestId/call', async (request, response) => {
   try {
     const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
     if (!Types.ObjectId.isValid(request.params.requestId)) throw new ApiError(404, 'produce_request_not_found');
-    const result = await initiateAcceptedRequestCall(new Types.ObjectId(request.params.requestId), farmer._id);
+    const result = await startAcceptedInAppCall(new Types.ObjectId(request.params.requestId), farmer._id);
     if (!result) throw new ApiError(404, 'produce_request_not_found');
     return response.json(result);
   } catch (error) { return sendError(response, error); }
@@ -872,10 +922,42 @@ app.post('/api/farmer/requests/:requestId/call/retry', async (request, response)
   try {
     const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
     if (!Types.ObjectId.isValid(request.params.requestId)) throw new ApiError(404, 'produce_request_not_found');
-    const result = await retryAcceptedRequestCall(new Types.ObjectId(request.params.requestId), farmer._id);
+    const result = await startAcceptedInAppCall(new Types.ObjectId(request.params.requestId), farmer._id);
     if (!result) throw new ApiError(404, 'produce_request_not_found');
     if ('conflict' in result && result.conflict) throw new ApiError(409, 'call_attempt_not_retryable');
     return response.json(result);
+  } catch (error) { return sendError(response, error); }
+});
+
+app.post('/api/farmer/calls/:sessionId/join', async (request, response) => {
+  try {
+    const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
+    if (!Types.ObjectId.isValid(request.params.sessionId)) throw new ApiError(404, 'in_app_call_not_found');
+    return response.json(await joinInAppCall(new Types.ObjectId(request.params.sessionId), 'farmer', farmer._id));
+  } catch (error) { return sendError(response, error); }
+});
+
+app.post('/api/consumer/calls/:sessionId/join', async (request, response) => {
+  try {
+    const { consumer } = await findAuthenticatedConsumer(request.header('authorization'));
+    if (!Types.ObjectId.isValid(request.params.sessionId)) throw new ApiError(404, 'in_app_call_not_found');
+    return response.json(await joinInAppCall(new Types.ObjectId(request.params.sessionId), 'consumer', consumer._id));
+  } catch (error) { return sendError(response, error); }
+});
+
+app.post('/api/farmer/calls/:sessionId/end', async (request, response) => {
+  try {
+    const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
+    if (!Types.ObjectId.isValid(request.params.sessionId)) throw new ApiError(404, 'in_app_call_not_found');
+    return response.json(await endMemberInAppCall(new Types.ObjectId(request.params.sessionId), 'farmer', farmer._id));
+  } catch (error) { return sendError(response, error); }
+});
+
+app.post('/api/consumer/calls/:sessionId/end', async (request, response) => {
+  try {
+    const { consumer } = await findAuthenticatedConsumer(request.header('authorization'));
+    if (!Types.ObjectId.isValid(request.params.sessionId)) throw new ApiError(404, 'in_app_call_not_found');
+    return response.json(await endMemberInAppCall(new Types.ObjectId(request.params.sessionId), 'consumer', consumer._id));
   } catch (error) { return sendError(response, error); }
 });
 

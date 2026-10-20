@@ -199,6 +199,7 @@ export type FarmerProduce = {
 export type FarmerProduceRequest = {
   id: string; listingId: string; listingName: string; listingNameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; buyerName?: string; requestedQuantity: number; unit: string;
   status: 'pending' | 'accepted' | 'rejected' | 'cancelled'; createdAt: string; decidedAt: string | null; callStatus?: 'not_started' | 'queued' | 'initiated' | 'failed' | 'completed' | 'unavailable'; callConfirmed?: boolean; callFailureCode?: string | null;
+  ownPhoneShared?: boolean; sharedPhone?: string | null;
 };
 
 export type FarmerNotification = { id: string; event: string; readAt: string | null; createdAt: string; request: FarmerProduceRequest | null };
@@ -360,6 +361,12 @@ export async function getFarmerRequests() {
   return request<{ items: FarmerProduceRequest[] }>('/api/farmer/requests', { headers: { Authorization: 'Bearer ' + tokens.accessToken } });
 }
 
+export async function shareFarmerRequestPhone(requestId: string) {
+  const tokens = await readTokens();
+  if (!tokens) throw new FarmerAuthError('unauthorized');
+  return request<{ shared: true }>(`/api/farmer/requests/${encodeURIComponent(requestId)}/share-phone`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.accessToken}` } });
+}
+
 export async function decideFarmerProduceRequest(requestId: string, decision: 'accepted' | 'rejected') {
   const tokens = await readTokens();
   if (!tokens) throw new FarmerAuthError('unauthorized');
@@ -372,13 +379,25 @@ export async function decideFarmerProduceRequest(requestId: string, decision: 'a
 export async function startFarmerRequestCall(requestId: string) {
   const tokens = await readTokens();
   if (!tokens) throw new FarmerAuthError('unauthorized');
-  return request<{ status: string; confirmed: boolean; failureCode?: string | null }>(`/api/farmer/requests/${encodeURIComponent(requestId)}/call`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.accessToken}` } });
+  return request<{ sessionId: string; status: 'ringing' | 'connected' }>(`/api/farmer/requests/${encodeURIComponent(requestId)}/call`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.accessToken}` } });
 }
 
 export async function retryFarmerRequestCall(requestId: string) {
   const tokens = await readTokens();
   if (!tokens) throw new FarmerAuthError('unauthorized');
-  return request<{ status: string; confirmed: boolean; failureCode?: string | null }>(`/api/farmer/requests/${encodeURIComponent(requestId)}/call/retry`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.accessToken}` } });
+  return request<{ sessionId: string; status: 'ringing' | 'connected' }>(`/api/farmer/requests/${encodeURIComponent(requestId)}/call/retry`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.accessToken}` } });
+}
+
+export async function joinFarmerInAppCall(sessionId: string) {
+  const tokens = await readTokens();
+  if (!tokens) throw new FarmerAuthError('unauthorized');
+  return request<{ serverUrl: string; participantToken: string; status: string }>(`/api/farmer/calls/${encodeURIComponent(sessionId)}/join`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.accessToken}` } });
+}
+
+export async function endFarmerInAppCall(sessionId: string) {
+  const tokens = await readTokens();
+  if (!tokens) throw new FarmerAuthError('unauthorized');
+  return request<{ status: 'ended' }>(`/api/farmer/calls/${encodeURIComponent(sessionId)}/end`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.accessToken}` } });
 }
 
 export async function getFarmerNotifications(page = 1) {

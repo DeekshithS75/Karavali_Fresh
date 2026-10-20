@@ -1,6 +1,6 @@
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, Linking, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Image } from 'expo-image';
 import * as Location from 'expo-location';
 
@@ -8,7 +8,7 @@ import { LanguageSelector } from '@/components/language-selector';
 import { EmptyState, MarketColors, ScreenFrame, SectionHeading } from '@/components/marketplace-ui';
 import { useLanguage } from '@/localization/LanguageProvider';
 import { registerAccountForPush } from '@/features/push-notifications';
-import { ConsumerAuthError, getConsumerListings, getConsumerNotifications, getConsumerPhotoHeaders, getConsumerProfile, getConsumerRequests, getConsumerSessionState, logoutConsumer, markConsumerNotificationRead, setConsumerPreferredLanguage, type ConsumerListing, type ConsumerListingQuery, type ConsumerNotification, type ConsumerProduceRequest } from '@/features/consumer-auth/client';
+import { ConsumerAuthError, getConsumerListings, getConsumerNotifications, getConsumerPhotoHeaders, getConsumerProfile, getConsumerRequests, getConsumerSessionState, logoutConsumer, markConsumerNotificationRead, setConsumerPreferredLanguage, shareConsumerRequestPhone, type ConsumerListing, type ConsumerListingQuery, type ConsumerNotification, type ConsumerProduceRequest } from '@/features/consumer-auth/client';
 import { localizedProduceName } from '@/localization/produce-name';
 
 type Sort = NonNullable<ConsumerListingQuery['sort']>;
@@ -38,6 +38,7 @@ export default function ConsumerHomeScreen() {
   const activeSection = params.section === 'requests' || params.section === 'notifications' ? params.section : section;
   const selectedRequestId = params.requestId ?? null;
   const [myRequests, setMyRequests] = useState<ConsumerProduceRequest[]>([]);
+  const [sharingPhoneId, setSharingPhoneId] = useState<string | null>(null);
   const [notifications, setNotifications] = useState<ConsumerNotification[]>([]);
   const [notificationsPage, setNotificationsPage] = useState(1);
   const [notificationsHasMore, setNotificationsHasMore] = useState(false);
@@ -172,9 +173,31 @@ export default function ConsumerHomeScreen() {
     return undefined;
   }, [sessionReady, refreshBuyerActivity]));
 
+  const hasAcceptedRequests = myRequests.some((item) => item.status === 'accepted');
+  useEffect(() => {
+    if (activeSection !== 'requests' || !hasAcceptedRequests) return undefined;
+    const timer = setInterval(() => {
+      if (AppState.currentState !== 'active') return;
+      void getConsumerRequests().then((result) => setMyRequests(result.items)).catch(() => undefined);
+    }, 10_000);
+    return () => clearInterval(timer);
+  }, [activeSection, hasAcceptedRequests]);
+
   const markRead = async (id: string) => {
     try { await markConsumerNotificationRead(id); await refreshBuyerActivity(); }
     catch { setRequestLoadError(true); }
+  };
+
+  const sharePhone = async (item: ConsumerProduceRequest) => {
+    setSharingPhoneId(item.id);
+    try { await shareConsumerRequestPhone(item.id); await refreshBuyerActivity(); }
+    catch { Alert.alert(t('contact.error' as never)); }
+    finally { setSharingPhoneId(null); }
+  };
+
+  const dialSharedPhone = async (phone: string) => {
+    try { await Linking.openURL(`tel:${phone}`); }
+    catch { Alert.alert(t('contact.error' as never)); }
   };
 
   const loadMoreNotifications = async () => {
@@ -253,7 +276,11 @@ export default function ConsumerHomeScreen() {
           <Text style={styles.quantity}>{t('consumer.requestedAmount').replace('{quantity}', String(item.requestedQuantity)).replace('{unit}', t(('produce.unit.' + item.unit) as never))}</Text>
           <Text style={styles.price}>{t(('consumer.requestStatus.' + item.status) as never)}</Text>
           <Text style={styles.quantity}>{t('consumer.priceAtRequest').replace('{price}', new Intl.NumberFormat(language === 'kn' ? 'kn-IN' : 'en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(item.pricePerUnit)).replace('{unit}', t(('produce.priceUnit.' + item.priceUnit) as never))}</Text>
-          {item.status === 'accepted' ? <Text style={styles.help}>{t(('consumer.callStatus.' + (item.callStatus ?? 'unavailable')) as never)}</Text> : null}
+          {item.status === 'accepted' ? <>
+            <Text style={styles.help}>{t(('consumer.callStatus.' + (item.callStatus ?? 'unavailable')) as never)}</Text>
+            {item.sharedPhone ? <Pressable accessibilityRole="button" onPress={() => void dialSharedPhone(item.sharedPhone!)} style={styles.detailsButton}><Text style={styles.detailsText}>{t('contact.call' as never)} {item.sharedPhone}</Text></Pressable> : null}
+            <Pressable accessibilityRole="button" disabled={Boolean(sharingPhoneId) || item.ownPhoneShared} onPress={() => void sharePhone(item)} style={styles.detailsButton}><Text style={styles.detailsText}>{t(item.ownPhoneShared ? 'contact.shared' as never : sharingPhoneId === item.id ? 'farmer.requests.working' as never : 'contact.share' as never)}</Text></Pressable>
+          </> : null}
         </View>)}
       </View>}
     </View> : <View style={styles.section}>

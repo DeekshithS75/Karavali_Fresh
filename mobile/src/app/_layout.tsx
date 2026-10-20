@@ -4,10 +4,12 @@ import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
 import { routeForNotificationData } from '@/features/notification-navigation';
 import { decideFarmerProduceRequest, FarmerAuthError } from '@/features/farmer-auth/client';
+import { registerGlobals } from '@livekit/react-native';
 
 import { LanguageProvider } from '@/localization/LanguageProvider';
 
 if (Platform.OS !== 'web') {
+  registerGlobals();
   Notifications.setNotificationHandler({
     handleNotification: async () => ({
       shouldShowBanner: true,
