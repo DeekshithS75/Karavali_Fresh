@@ -11,27 +11,52 @@ process.env.EXOTEL_STATUS_CALLBACK_URL = 'https://calls.example.test';
 
 const { createExotelBridgedCall, ExotelCallError } = await import('../src/providers/calls.js');
 
-test('Exotel bridges Consumer first to Farmer with the business caller ID and secured status callback', async (context: TestContext) => {
+test('Exotel calls the Farmer first then bridges the Buyer using Basic auth and a secured status callback', async (context: TestContext) => {
   let requestUrl = '';
   let requestBody = '';
+  let authorization = '';
   context.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
     requestUrl = String(input);
     requestBody = String(init?.body);
+    authorization = (init?.headers as Record<string, string>).Authorization ?? '';
     return new Response(JSON.stringify({ Call: { Sid: 'CA123456789', Status: 'queued' } }), { status: 200 });
   });
   const result = await createExotelBridgedCall({ consumerPhone: '+919876543210', farmerPhone: '+919876543211', callAttemptId: 'attempt-id-123', callbackToken: 'private-callback-token' });
   assert.equal(requestUrl, 'https://api.in.exotel.com/v1/Accounts/test-account/Calls/connect');
+  assert.equal(authorization, 'Basic ' + Buffer.from('test-key:test-token').toString('base64'));
+  assert.equal(requestUrl.includes('private-callback-token'), false);
+  assert.equal(requestBody.includes('private-callback-token'), true);
   const parameters = new URLSearchParams(requestBody);
-  assert.equal(parameters.get('From'), '+919876543210');
-  assert.equal(parameters.get('To'), '+919876543211');
+  assert.equal(parameters.get('From'), '+919876543211');
+  assert.equal(parameters.get('To'), '+919876543210');
   assert.equal(parameters.get('CallerId'), '+911234567890');
+  assert.equal(parameters.get('CallType'), 'trans');
+  assert.equal(parameters.get('StatusCallbackContentType'), 'application/json');
   assert.equal(parameters.get('CustomField'), 'attempt-id-123');
   assert.match(parameters.get('StatusCallback') ?? '', /https:\/\/calls\.example\.test\/api\/provider\/exotel\/calls\/private-callback-token/);
   assert.equal(result.providerReference, 'CA123456789');
   assert.equal(result.status, 'queued');
 });
 
+test('Exotel busy and no-answer results stay call failures with their reason', async (context: TestContext) => {
+  for (const status of ['busy', 'no-answer', 'failed']) {
+    context.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ Call: { Sid: 'CA123456789', Status: status } }), { status: 200 }));
+    const result = await createExotelBridgedCall({ consumerPhone: '+919876543210', farmerPhone: '+919876543211', callAttemptId: 'attempt-id-123', callbackToken: 'private-callback-token' });
+    assert.equal(result.status, 'failed');
+    assert.equal(result.failureCode, status);
+    context.mock.restoreAll();
+  }
+});
+
 test('Exotel network failures are marked ambiguous so automatic retries cannot place duplicate calls', async (context: TestContext) => {
   context.mock.method(globalThis, 'fetch', async () => { throw new Error('socket closed'); });
   await assert.rejects(createExotelBridgedCall({ consumerPhone: '+919876543210', farmerPhone: '+919876543211', callAttemptId: 'attempt-id-123', callbackToken: 'private-callback-token' }), (error) => error instanceof ExotelCallError && error.ambiguous);
+});
+
+test('Exotel authentication rejection is a definite safe failure and response details are not surfaced', async (context: TestContext) => {
+  context.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ RestException: { Status: 401, Message: 'private provider detail' } }), { status: 401 }));
+  await assert.rejects(
+    createExotelBridgedCall({ consumerPhone: '+919876543210', farmerPhone: '+919876543211', callAttemptId: 'attempt-id-123', callbackToken: 'private-callback-token' }),
+    (error) => error instanceof ExotelCallError && error.code === 'provider_rejected' && !error.ambiguous && !error.message.includes('private provider detail'),
+  );
 });

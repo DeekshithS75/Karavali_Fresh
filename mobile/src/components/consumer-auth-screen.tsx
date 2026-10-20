@@ -1,5 +1,5 @@
 import { router } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Linking, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { LanguageSelector } from '@/components/language-selector';
 import { MarketColors, ScreenFrame } from '@/components/marketplace-ui';
@@ -17,16 +17,36 @@ export function ConsumerAuthScreen({ page }: { page: Page }) {
   const [phoneConsent, setPhoneConsent] = useState(false);
   const [errorKey, setErrorKey] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const completingRef = useRef(false);
   const isRegister = page === 'register';
   const unsupportedPage = page === 'forgot-password' || page === 'otp';
 
   useEffect(() => {
     if (!challenge) return;
-    const timer = setInterval(() => void getConsumerPhoneVerificationStatus(challenge.challengeId).then((result) => {
-      if (result.status === 'verified') setVerified(true);
-      if (result.status === 'expired' || result.status === 'cancelled') { setChallenge(null); setErrorKey('consumer.auth.verificationExpired'); }
-    }).catch(() => undefined), 2500);
-    return () => clearInterval(timer);
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const result = await getConsumerPhoneVerificationStatus(challenge.challengeId);
+        if (!active) return;
+        if (result.status === 'verified') { setVerified(true); return; }
+        if (result.status === 'expired' || result.status === 'cancelled') {
+          setChallenge(null);
+          setErrorKey('consumer.auth.verificationExpired');
+          return;
+        }
+      } catch (error) {
+        if (!active) return;
+        if (error instanceof ConsumerAuthError && error.serverError === 'verification_challenge_not_found') {
+          setChallenge(null);
+          setErrorKey('consumer.auth.verificationExpired');
+          return;
+        }
+      }
+      if (active) timer = setTimeout(() => void poll(), 2500);
+    };
+    void poll();
+    return () => { active = false; if (timer) clearTimeout(timer); };
   }, [challenge]);
 
   useEffect(() => {
@@ -39,10 +59,18 @@ export function ConsumerAuthScreen({ page }: { page: Page }) {
   const submit = async () => {
     setErrorKey(null);
     if (challenge && verified) {
+      if (completingRef.current) return;
+      completingRef.current = true;
       setBusy(true);
       try { await completeConsumerPhoneVerification(challenge.challengeId, isRegister ? fullName.trim() : undefined, language); router.replace('/consumer'); }
-      catch { setErrorKey('consumer.auth.networkError'); }
-      finally { setBusy(false); }
+      catch (error) {
+        if (error instanceof ConsumerAuthError && error.serverError === 'verification_challenge_not_found') {
+          setChallenge(null);
+          setVerified(false);
+          setErrorKey('consumer.auth.verificationExpired');
+        } else setErrorKey('consumer.auth.networkError');
+      }
+      finally { completingRef.current = false; setBusy(false); }
       return;
     }
     if (isRegister && !fullName.trim()) { setErrorKey('consumer.auth.nameRequired'); return; }

@@ -51,7 +51,7 @@ export type ConsumerListingQuery = {
 export type ConsumerProduceRequest = {
   id: string; listingId: string; listingName: string; listingNameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; pricePerUnit: number; priceUnit: string;
   requestedQuantity: number; unit: string; status: 'pending' | 'accepted' | 'rejected' | 'cancelled';
-  createdAt: string; decidedAt: string | null; callStatus?: 'queued' | 'initiated' | 'failed' | 'completed' | 'unavailable'; callConfirmed?: boolean;
+  createdAt: string; decidedAt: string | null; callStatus?: 'not_started' | 'queued' | 'initiated' | 'failed' | 'completed' | 'unavailable'; callConfirmed?: boolean;
 };
 
 export type ConsumerNotification = {

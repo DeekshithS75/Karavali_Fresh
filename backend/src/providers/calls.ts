@@ -1,6 +1,7 @@
 import { config } from '../config.js';
 
 export type ExotelInitialStatus = 'queued' | 'initiated' | 'completed' | 'failed';
+export type ExotelFailureCode = 'failed' | 'busy' | 'no-answer';
 
 export class ExotelCallError extends Error {
   constructor(readonly code: 'provider_rejected' | 'provider_unavailable' | 'response_invalid', readonly ambiguous: boolean) { super(code); }
@@ -13,15 +14,17 @@ export function isExotelCallConfigured() {
 
 export async function createExotelBridgedCall(input: {
   consumerPhone: string; farmerPhone: string; callAttemptId: string; callbackToken: string;
-}): Promise<{ providerReference: string; status: ExotelInitialStatus }> {
+}): Promise<{ providerReference: string; status: ExotelInitialStatus; failureCode?: ExotelFailureCode }> {
   if (!isExotelCallConfigured()) throw new ExotelCallError('provider_unavailable', false);
   const host = config.EXOTEL_REGION === 'mumbai' ? 'api.in.exotel.com' : 'api.exotel.com';
   const endpoint = `https://${host}/v1/Accounts/${encodeURIComponent(config.EXOTEL_ACCOUNT_SID!)}/Calls/connect`;
   const callbackBase = config.EXOTEL_STATUS_CALLBACK_URL!.replace(/\/$/, '');
   const callbackUrl = `${callbackBase}/api/provider/exotel/calls/${encodeURIComponent(input.callbackToken)}`;
   const parameters = new URLSearchParams({
-    From: input.consumerPhone,
-    To: input.farmerPhone,
+    // Connect Two Numbers calls From first. The farmer explicitly starts this
+    // action, so call the farmer first and bridge the buyer after they answer.
+    From: input.farmerPhone,
+    To: input.consumerPhone,
     CallerId: config.EXOTEL_CALLER_ID!,
     CallType: 'trans',
     StatusCallback: callbackUrl,
@@ -57,6 +60,6 @@ export async function createExotelBridgedCall(input: {
   if (status === 'queued') return { providerReference: sid, status: 'queued' };
   if (status === 'in-progress') return { providerReference: sid, status: 'initiated' };
   if (status === 'completed') return { providerReference: sid, status: 'completed' };
-  if (['failed', 'busy', 'no-answer'].includes(status)) return { providerReference: sid, status: 'failed' };
+  if (status === 'failed' || status === 'busy' || status === 'no-answer') return { providerReference: sid, status: 'failed', failureCode: status };
   throw new ExotelCallError('response_invalid', true);
 }

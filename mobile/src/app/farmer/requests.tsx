@@ -1,11 +1,21 @@
 import { router, useLocalSearchParams } from 'expo-router';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, Pressable, StyleSheet, Text, View } from 'react-native';
 import { FarmerDashboardGuard } from '@/components/farmer-auth-flow';
 import { EmptyState, MarketColors, ScreenFrame, SectionHeading } from '@/components/marketplace-ui';
-import { FarmerAuthError, decideFarmerProduceRequest, getFarmerNotifications, getFarmerRequests, markFarmerNotificationRead, retryFarmerRequestCall, type FarmerProduceRequest } from '@/features/farmer-auth/client';
+import { FarmerAuthError, decideFarmerProduceRequest, getFarmerNotifications, getFarmerRequests, markFarmerNotificationRead, retryFarmerRequestCall, startFarmerRequestCall, type FarmerProduceRequest } from '@/features/farmer-auth/client';
 import { useLanguage } from '@/localization/LanguageProvider';
 import { localizedProduceName } from '@/localization/produce-name';
+
+function callStatusMessageKey(item: FarmerProduceRequest) {
+  if (item.callFailureCode === 'provider_response_unknown') return 'consumer.callStatus.unknown';
+  if (item.callFailureCode === 'provider_not_configured') return 'consumer.callStatus.providerNotConfigured';
+  if (item.callFailureCode === 'participant_unavailable' || item.callFailureCode === 'participant_phone_invalid') return 'consumer.callStatus.participantUnavailable';
+  if (item.callFailureCode === 'provider_rejected') return 'consumer.callStatus.providerRejected';
+  if (item.callFailureCode === 'busy') return 'consumer.callStatus.busy';
+  if (item.callFailureCode === 'no-answer') return 'consumer.callStatus.noAnswer';
+  return 'consumer.callStatus.' + (item.callStatus ?? 'not_started');
+}
 
 export default function FarmerRequestsScreen() {
   const { t, language } = useLanguage();
@@ -14,6 +24,8 @@ export default function FarmerRequestsScreen() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  const [callError, setCallError] = useState<string | null>(null);
+  const callActionRef = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true); setError(false);
@@ -34,6 +46,25 @@ export default function FarmerRequestsScreen() {
     return () => subscription.remove();
   }, [load]);
 
+  useEffect(() => {
+    if (!items.some((item) => item.status === 'accepted' && (item.callStatus === 'queued' || item.callStatus === 'initiated'))) return undefined;
+    let active = true;
+    const timer = setInterval(() => {
+      if (AppState.currentState !== 'active') return;
+      void getFarmerRequests().then((response) => {
+        if (!active) return;
+        const latest = new Map(response.items.map((item) => [item.id, item]));
+        setItems((current) => current.map((item) => {
+          const update = latest.get(item.id);
+          return update ? { ...item, callStatus: update.callStatus, callConfirmed: update.callConfirmed, callFailureCode: update.callFailureCode } : item;
+        }));
+      }).catch((reason) => {
+        if (active && reason instanceof FarmerAuthError && reason.code === 'unauthorized') router.replace('/auth/farmer');
+      });
+    }, 4000);
+    return () => { active = false; clearInterval(timer); };
+  }, [items]);
+
   const decide = (item: FarmerProduceRequest, decision: 'accepted' | 'rejected') => {
     Alert.alert(t(decision === 'accepted' ? 'farmer.requests.acceptTitle' : 'farmer.requests.rejectTitle'), t('farmer.requests.confirm').replace('{name}', item.listingName), [
       { text: t('produce.deleteCancel'), style: 'cancel' },
@@ -44,9 +75,26 @@ export default function FarmerRequestsScreen() {
     ]);
   };
 
+  const callBuyer = (item: FarmerProduceRequest) => {
+    if (callActionRef.current === item.id) return;
+    callActionRef.current = item.id;
+    setBusyId(item.id);
+    setCallError(null);
+    const retry = item.callStatus === 'failed' || Boolean(item.callFailureCode);
+    void (retry ? retryFarmerRequestCall(item.id) : startFarmerRequestCall(item.id))
+      .then(load)
+      .catch((reason) => {
+        if (reason instanceof FarmerAuthError && reason.code === 'unauthorized') router.replace('/auth/farmer');
+        else setCallError(reason instanceof FarmerAuthError && ['network', 'apiUrlMissing', 'urlNotAllowed'].includes(reason.code)
+          ? 'farmer.requests.callConnectionError' : 'farmer.requests.callError');
+      })
+      .finally(() => { callActionRef.current = null; setBusyId(null); });
+  };
+
   return <FarmerDashboardGuard><ScreenFrame>
     <Pressable accessibilityRole="button" onPress={() => router.replace('/farmer')} style={styles.back}><Text style={styles.backText}>‹ {t('navigation.welcome')}</Text></Pressable>
     <SectionHeading title={t('farmer.requests.title')} detail={t('farmer.requests.detail')} />
+    {callError ? <Text accessibilityRole="alert" style={styles.error}>{t(callError as never)}</Text> : null}
     {loading && !items.length ? <View style={styles.center}><ActivityIndicator color={MarketColors.green} /></View> : error ? <View style={styles.card}><Text accessibilityRole="alert" style={styles.error}>{t('farmer.requests.loadError')}</Text><Pressable accessibilityRole="button" onPress={() => void load()} style={styles.button}><Text style={styles.buttonText}>{t('produce.retry')}</Text></Pressable></View> : items.length === 0 ? <EmptyState icon="📨" title={t('farmer.requests.emptyTitle')} message={t('farmer.requests.emptyMessage')} /> : <View style={styles.list}>
       {items.map((item) => <View key={item.id} style={[styles.card, requestId === item.id && styles.selected]}>
         <Text style={styles.buyer}>{item.buyerName ?? t('farmer.requests.buyer')}</Text>
@@ -54,7 +102,10 @@ export default function FarmerRequestsScreen() {
         <Text style={styles.body}>{t('farmer.requests.quantity').replace('{quantity}', String(item.requestedQuantity)).replace('{unit}', t(('produce.unit.' + item.unit) as never))}</Text>
         <Text style={styles.body}>{new Date(item.createdAt).toLocaleString()}</Text>
         <Text style={styles.status}>{t(('farmer.requests.status.' + item.status) as never)}</Text>
-        {item.status === 'accepted' ? <><Text style={styles.body}>{t(('consumer.callStatus.' + (item.callStatus ?? 'unavailable')) as never)}</Text>{item.callStatus === 'failed' || item.callStatus === 'unavailable' ? <Pressable accessibilityRole="button" disabled={Boolean(busyId)} onPress={() => { setBusyId(item.id); void retryFarmerRequestCall(item.id).then(load).catch(() => setError(true)).finally(() => setBusyId(null)); }} style={styles.button}><Text style={styles.buttonText}>{t('farmer.requests.retryCall')}</Text></Pressable> : null}</> : null}
+        {item.status === 'accepted' ? <>
+          <Text style={styles.body}>{t(callStatusMessageKey(item) as never)}</Text>
+          {item.callStatus === 'not_started' || item.callStatus === 'failed' || item.callStatus === 'unavailable' ? <Pressable accessibilityRole="button" disabled={Boolean(busyId)} onPress={() => callBuyer(item)} style={styles.button}><Text style={styles.buttonText}>{t(busyId === item.id ? 'farmer.requests.working' : item.callStatus === 'failed' || Boolean(item.callFailureCode) ? 'farmer.requests.retryCall' : 'farmer.requests.callBuyer')}</Text></Pressable> : null}
+        </> : null}
         {item.status === 'pending' ? <View style={styles.actions}>
           <Pressable accessibilityRole="button" disabled={Boolean(busyId)} onPress={() => decide(item, 'accepted')} style={styles.button}><Text style={styles.buttonText}>{busyId === item.id ? t('farmer.requests.working') : t('farmer.requests.accept')}</Text></Pressable>
           <Pressable accessibilityRole="button" disabled={Boolean(busyId)} onPress={() => decide(item, 'rejected')} style={styles.reject}><Text style={styles.rejectText}>{t('farmer.requests.reject')}</Text></Pressable>

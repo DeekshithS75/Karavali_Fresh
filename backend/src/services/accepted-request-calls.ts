@@ -2,35 +2,39 @@ import { Types } from 'mongoose';
 import { decryptSecretValue, hmac, randomToken } from '../crypto.js';
 import { CallAttemptModel, ConsumerModel, FarmerModel, NotificationModel, ProduceRequestModel } from '../models/index.js';
 import { createExotelBridgedCall, ExotelCallError, isExotelCallConfigured } from '../providers/calls.js';
+import { normalizeIndianPhone } from '../providers/otp.js';
 import { notificationCopy } from './notification-copy.js';
 import { sendAccountPush } from './push-notifications.js';
 
-export type CallStatus = 'queued' | 'initiated' | 'failed' | 'completed' | 'unavailable';
+export type CallStatus = 'not_started' | 'queued' | 'initiated' | 'failed' | 'completed' | 'unavailable';
+export type CallFailureCode = 'provider_not_configured' | 'participant_unavailable' | 'participant_phone_invalid' | 'provider_rejected' | 'provider_unavailable' | 'response_invalid' | 'provider_response_unknown' | 'failed' | 'busy' | 'no-answer' | 'provider_failed';
 
 type AcceptedRequest = { _id: Types.ObjectId; buyerId: Types.ObjectId; farmerId: Types.ObjectId; status: string };
 type CallParticipant = { _id: Types.ObjectId; preferredLanguage?: 'en' | 'kn' | 'tcy'; phoneCiphertext?: string };
 
 export async function latestRequestCallStatus(requestId: Types.ObjectId) {
   const attempt = await CallAttemptModel.findOne({ requestId }).sort({ attempt: -1 }).select('status failureCode providerReference').lean().exec() as {
-    status: Exclude<CallStatus, 'unavailable'>; failureCode?: string; providerReference?: string;
+    status: Exclude<CallStatus, 'not_started' | 'unavailable'>; failureCode?: string; providerReference?: string;
   } | null;
-  if (!attempt) return { status: 'unavailable' as const, confirmed: false };
-  if (attempt.status === 'failed' && attempt.failureCode === 'provider_not_configured') return { status: 'unavailable' as const, confirmed: false };
-  return { status: attempt.status, confirmed: Boolean(attempt.providerReference) };
+  if (!attempt) return { status: 'not_started' as const, confirmed: false, failureCode: null };
+  if (attempt.status === 'failed' && attempt.failureCode === 'provider_not_configured') return { status: 'unavailable' as const, confirmed: false, failureCode: 'provider_not_configured' as const };
+  return { status: attempt.status, confirmed: Boolean(attempt.providerReference), failureCode: (attempt.failureCode as CallFailureCode | undefined) ?? null };
 }
 
-export async function initiateAcceptedRequestCall(requestId: Types.ObjectId, farmerId?: Types.ObjectId) {
+export async function initiateAcceptedRequestCall(requestId: Types.ObjectId, farmerId: Types.ObjectId, allowRetry = false) {
   const request = await ProduceRequestModel.findOne({
-    _id: requestId, status: 'accepted', ...(farmerId ? { farmerId } : {}),
+    _id: requestId, status: 'accepted', farmerId,
   }).select('_id buyerId farmerId status').lean().exec() as AcceptedRequest | null;
-  if (!request) return { status: 'unavailable' as const, confirmed: false };
+  if (!request) return null;
 
   const active = await CallAttemptModel.findOne({ requestId, status: { $in: ['queued', 'initiated'] } })
     .select('status providerReference').lean().exec() as { status: 'queued' | 'initiated'; providerReference?: string } | null;
   if (active) return { status: active.status, confirmed: Boolean(active.providerReference) };
 
   const previous = await CallAttemptModel.findOne({ requestId }).sort({ attempt: -1 }).select('attempt status failureCode').lean().exec() as { attempt: number; status: string; failureCode?: string } | null;
-  if (previous && previous.status !== 'failed') return latestRequestCallStatus(requestId);
+  // A new call endpoint is idempotent after any attempt. Only the separate,
+  // explicit retry action may create another attempt after a definite failure.
+  if (previous && (!allowRetry || previous.status !== 'failed')) return latestRequestCallStatus(requestId);
   const attemptNumber = (previous?.attempt ?? 0) + 1;
   const callbackToken = randomToken(32);
   let attempt;
@@ -45,50 +49,57 @@ export async function initiateAcceptedRequestCall(requestId: Types.ObjectId, far
   if (!attempt) return { status: 'unavailable' as const, confirmed: false };
 
   if (!isExotelCallConfigured()) {
-    await CallAttemptModel.updateOne({ _id: attempt._id, status: 'queued' }, { $set: { status: 'failed', failureCode: 'provider_not_configured', completedAt: new Date() }, $unset: { activeRequestId: 1 } }).exec();
-    await notifyParticipants(request, 'call_failed', 'provider_not_configured');
-    return { status: 'unavailable' as const, confirmed: false };
+    const changed = await CallAttemptModel.updateOne({ _id: attempt._id, status: 'queued' }, { $set: { status: 'failed', failureCode: 'provider_not_configured', completedAt: new Date() }, $unset: { activeRequestId: 1 } }).exec();
+    if (changed.modifiedCount) await notifyParticipants(request, 'call_failed', 'provider_not_configured');
+    return { status: 'unavailable' as const, confirmed: false, failureCode: 'provider_not_configured' as const };
   }
 
   const [buyer, farmer] = await Promise.all([
     ConsumerModel.findOne({ _id: request.buyerId, accountStatus: 'active' }).select('+phoneCiphertext preferredLanguage').lean().exec() as Promise<CallParticipant | null>,
     FarmerModel.findOne({ _id: request.farmerId, accountStatus: 'active', phoneVerificationStatus: 'verified' }).select('phone preferredLanguage').lean().exec() as Promise<(CallParticipant & { phone?: string }) | null>,
   ]);
-  if (!buyer?.phoneCiphertext || !farmer?.phone) {
-    await CallAttemptModel.updateOne({ _id: attempt._id, status: 'queued' }, { $set: { status: 'failed', failureCode: 'participant_unavailable', completedAt: new Date() }, $unset: { activeRequestId: 1 } }).exec();
-    await notifyParticipants(request, 'call_failed', 'participant_unavailable');
-    return { status: 'failed' as const, confirmed: false };
+  let consumerPhone: string | null = null;
+  if (buyer?.phoneCiphertext) {
+    try { consumerPhone = normalizeIndianPhone(decryptSecretValue(buyer.phoneCiphertext)); }
+    catch { consumerPhone = null; }
+  }
+  const farmerPhone = farmer?.phone ? normalizeIndianPhone(farmer.phone) : null;
+  if (!consumerPhone || !farmerPhone) {
+    const failureCode = buyer?.phoneCiphertext && farmer?.phone ? 'participant_phone_invalid' : 'participant_unavailable';
+    const changed = await CallAttemptModel.updateOne({ _id: attempt._id, status: 'queued' }, { $set: { status: 'failed', failureCode, completedAt: new Date() }, $unset: { activeRequestId: 1 } }).exec();
+    if (changed.modifiedCount) await notifyParticipants(request, 'call_failed', failureCode);
+    return { status: 'failed' as const, confirmed: false, failureCode };
   }
 
   let result;
   try {
     result = await createExotelBridgedCall({
-      consumerPhone: decryptSecretValue(buyer.phoneCiphertext), farmerPhone: farmer.phone,
+      consumerPhone, farmerPhone,
       callAttemptId: String(attempt._id), callbackToken,
     });
   } catch (error) {
     const ambiguous = error instanceof ExotelCallError && error.ambiguous;
     if (!ambiguous) {
       const failureCode = error instanceof ExotelCallError ? error.code : 'provider_unavailable';
-      await CallAttemptModel.updateOne({ _id: attempt._id, status: 'queued' }, { $set: { status: 'failed', failureCode, completedAt: new Date() }, $unset: { activeRequestId: 1 } }).exec();
-      await notifyParticipants(request, 'call_failed', failureCode);
-      return { status: 'failed' as const, confirmed: false };
+      const changed = await CallAttemptModel.updateOne({ _id: attempt._id, status: 'queued' }, { $set: { status: 'failed', failureCode, completedAt: new Date() }, $unset: { activeRequestId: 1 } }).exec();
+      if (changed.modifiedCount) await notifyParticipants(request, 'call_failed', failureCode);
+      return { status: 'failed' as const, confirmed: false, failureCode: failureCode as CallFailureCode };
     }
     await CallAttemptModel.updateOne({ _id: attempt._id, status: 'queued' }, { $set: { failureCode: 'provider_response_unknown' } }).exec();
-    return { status: 'queued' as const, confirmed: false };
+    return { status: 'queued' as const, confirmed: false, failureCode: 'provider_response_unknown' as const };
   }
 
   const nextStatus = result.status;
-  await CallAttemptModel.updateOne({ _id: attempt._id, status: 'queued' }, {
-    $set: { providerReference: result.providerReference, status: nextStatus, ...(nextStatus === 'failed' || nextStatus === 'completed' ? { completedAt: new Date() } : {}) },
-    $unset: { failureCode: 1, ...(nextStatus === 'failed' || nextStatus === 'completed' ? { activeRequestId: 1 } : {}) },
+  const changed = await CallAttemptModel.updateOne({ _id: attempt._id, status: 'queued' }, {
+    $set: { providerReference: result.providerReference, status: nextStatus, ...(result.failureCode ? { failureCode: result.failureCode } : {}), ...(nextStatus === 'failed' || nextStatus === 'completed' ? { completedAt: new Date() } : {}) },
+    $unset: { ...(!result.failureCode ? { failureCode: 1 } : {}), ...(nextStatus === 'failed' || nextStatus === 'completed' ? { activeRequestId: 1 } : {}) },
   }).exec();
   const current = await CallAttemptModel.findById(attempt._id).select('status providerReference failureCode').lean().exec() as { status: 'queued' | 'initiated' | 'failed' | 'completed'; providerReference?: string; failureCode?: string } | null;
-  if (current?.status === 'failed') await notifyParticipants(request, 'call_failed', current.failureCode ?? 'provider_failed');
-  else if (current?.status === 'completed') await notifyParticipants(request, 'call_completed');
-  else if (current?.status === 'initiated') await notifyParticipants(request, 'call_initiated');
-  else if (current?.status === 'queued' && current.providerReference) await notifyParticipants(request, 'call_queued');
-  return { status: current?.status ?? 'queued', confirmed: Boolean(current?.providerReference) };
+  if (changed.modifiedCount && current?.status === 'failed') await notifyParticipants(request, 'call_failed', current.failureCode ?? 'provider_failed');
+  else if (changed.modifiedCount && current?.status === 'completed') await notifyParticipants(request, 'call_completed');
+  else if (changed.modifiedCount && current?.status === 'initiated') await notifyParticipants(request, 'call_initiated');
+  else if (changed.modifiedCount && current?.status === 'queued' && current.providerReference) await notifyParticipants(request, 'call_queued');
+  return { status: current?.status ?? 'queued', confirmed: Boolean(current?.providerReference), failureCode: current?.failureCode as CallFailureCode | undefined ?? null };
 }
 
 export async function retryAcceptedRequestCall(requestId: Types.ObjectId, farmerId: Types.ObjectId) {
@@ -96,7 +107,7 @@ export async function retryAcceptedRequestCall(requestId: Types.ObjectId, farmer
   if (!request) return null;
   const latest = await CallAttemptModel.findOne({ requestId }).sort({ attempt: -1 }).select('status').lean().exec() as { status: string } | null;
   if (!latest || latest.status !== 'failed') return { conflict: true as const, ...(await latestRequestCallStatus(requestId)) };
-  return initiateAcceptedRequestCall(requestId, farmerId);
+  return initiateAcceptedRequestCall(requestId, farmerId, true);
 }
 
 export async function applyExotelCallStatus(input: {
@@ -112,8 +123,9 @@ export async function applyExotelCallStatus(input: {
   if (!mapped || (attempt.status !== 'queued' && attempt.status !== 'initiated')) return true;
   if (attempt.providerReference && attempt.providerReference !== input.callSid) return false;
   const failureCode = mapped === 'failed' ? input.status.replace(/[^a-z-]/g, '').slice(0, 40) || 'provider_failed' : undefined;
+  const allowedStatuses = mapped === 'initiated' ? ['queued'] : ['queued', 'initiated'];
   const changed = await CallAttemptModel.updateOne({
-    _id: attempt._id, status: { $in: ['queued', 'initiated'] }, $or: [{ providerReference: { $exists: false } }, { providerReference: input.callSid }],
+    _id: attempt._id, status: { $in: allowedStatuses }, $or: [{ providerReference: { $exists: false } }, { providerReference: input.callSid }],
   }, { $set: { providerReference: input.callSid, status: mapped, ...(mapped === 'completed' || mapped === 'failed' ? { completedAt: new Date() } : {}), ...(failureCode ? { failureCode } : {}) }, ...(mapped === 'completed' || mapped === 'failed' ? { $unset: { activeRequestId: 1 } } : {}) }).exec();
   if (changed.modifiedCount) {
     const request = await ProduceRequestModel.findById(attempt.requestId).select('_id buyerId farmerId status').lean().exec() as AcceptedRequest | null;

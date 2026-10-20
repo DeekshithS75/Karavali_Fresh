@@ -12,7 +12,7 @@ Consumers browse only produce with `status: published`, positive available quant
 
 ## Start locally
 
-Consumer request acceptance can trigger a private Exotel bridged call after the stock transaction commits. The API never returns either phone number in request, notification, or push payloads. Sending a request requires explicit call-bridging consent. Configure `EXOTEL_ACCOUNT_SID`, `EXOTEL_API_KEY`, `EXOTEL_API_TOKEN`, `EXOTEL_CALLER_ID`, `EXOTEL_REGION`, and a public HTTPS `EXOTEL_STATUS_CALLBACK_URL`. Complete Exotel account onboarding and India KYC where required, enable outbound calls, and provision an approved ExoPhone. Definite failed attempts can be retried by the Farmer; uncertain provider timeouts stay queued to avoid duplicate calls.
+After a Farmer accepts a Consumer request, the Farmer explicitly taps **Call buyer privately** to start an Exotel bridged call. Exotel calls the Farmer first, then calls the Consumer after the Farmer answers. The API never returns either phone number in request, notification, or push payloads. Sending a request requires explicit call-bridging consent. Configure `EXOTEL_ACCOUNT_SID`, `EXOTEL_API_KEY`, `EXOTEL_API_TOKEN`, `EXOTEL_CALLER_ID`, `EXOTEL_REGION`, and a public HTTPS `EXOTEL_STATUS_CALLBACK_URL`. Complete Exotel account onboarding and India KYC where required, enable outbound calls, and provision an approved ExoPhone. Definite failed attempts can be retried explicitly by the Farmer; uncertain provider timeouts stay pending and cannot be retried automatically to avoid duplicate calls.
 
 To reset development Consumer accounts, first run `npx tsx scripts/reset-consumer-accounts.ts` for a read-only dry run. Execution requires `--confirm`, `--expected-database=<name>`, and `--expected-consumers=<count>`. The script writes a mode-600 backup outside the repository, cancels pending requests, retains request history, and verifies Farmer and listing counts are unchanged.
 
@@ -28,6 +28,46 @@ Buyer requests are stored in `ProduceRequest` and create persistent role-scoped 
 4. Configure `DATA_GOV_IN_API_KEY` for the data.gov.in Mandi resource. The key stays on the backend and is never sent to the mobile app.
 5. Set up Cloudinary as described below and add its credentials to `backend/.env`.
 6. Run `npm install` and `npm run dev`.
+
+## Deploy the backend to Render
+
+Create a Render **Web Service** from this repository with these settings:
+
+| Setting | Value |
+| --- | --- |
+| Root Directory | `backend` |
+| Build Command | `npm ci && npm run build` |
+| Start Command | `npm start` |
+| Health Check Path | `/health` |
+
+`npm run build` compiles `src/index.ts` to `dist/index.js`, which is the target of the existing `start` script. The server uses Render's `PORT` environment variable (with `4000` as the local fallback) and binds to `0.0.0.0`. Startup validates production secrets, connects to MongoDB, and creates indexes before listening. `/health` returns `200` only while Mongoose is connected and `503` otherwise. Render should set `NODE_ENV=production`; do not set `PORT` manually.
+
+Set these Render environment variables for the core production service:
+
+| Variable | Requirement |
+| --- | --- |
+| `NODE_ENV` | Required; set to `production`. |
+| `MONGODB_URI` | Required; use a MongoDB Atlas replica-set URI and allow Render's outbound network access in Atlas. Transactions require a replica set. |
+| `MOBILE_ORIGIN` | Required; comma-separated exact HTTPS origins for the hosted browser app. Production rejects `*`. Native mobile requests do not normally send a browser Origin. |
+| `TOKEN_HMAC_SECRET` | Required; independent random secret, at least 32 characters. |
+| `PHONE_HASH_SECRET` | Required; independent random secret, at least 32 characters. |
+| `AADHAAR_HASH_SECRET` | Required; independent random secret, at least 32 characters. |
+| `AADHAAR_ENCRYPTION_KEY_BASE64` | Required; base64 encoding of exactly 32 random bytes. |
+
+Add service credentials according to the features enabled in production:
+
+| Feature | Environment variables |
+| --- | --- |
+| Farmer and Consumer missed-call verification | `NACALLER_KEY` |
+| Farmer-to-buyer calls | `EXOTEL_ACCOUNT_SID`, `EXOTEL_API_KEY`, `EXOTEL_API_TOKEN`, `EXOTEL_CALLER_ID`, `EXOTEL_REGION`, `EXOTEL_STATUS_CALLBACK_URL` |
+| Produce photo uploads | `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` |
+| Mandi market-price quotes | `DATA_GOV_IN_API_KEY` |
+
+The variables in these feature groups are optional for process startup, but their feature will be unavailable or fail closed when its credentials are absent. Set all six Exotel variables together; the callback base must be the Render HTTPS origin (for example `https://<service>.onrender.com`), without a path or trailing callback token. The backend registers the callback as `https://<service>.onrender.com/api/provider/exotel/calls/<opaque-token>` for each call attempt. Configure that public HTTPS base in `EXOTEL_STATUS_CALLBACK_URL`; do not use localhost or a Cloudflare tunnel in production. Exotel must be configured with an approved caller ID and outbound calling enabled.
+
+The following settings are optional and default in `src/config.ts`: `MARKET_PRICE_FRESHNESS_DAYS`, `PRIVACY_NOTICE_VERSION`, `PRIVACY_NOTICE_EN`, `PRIVACY_NOTICE_KN`, `PRIVACY_NOTICE_TCY`, `PHONE_VERIFICATION_TTL_SECONDS`, `PHONE_VERIFICATION_RESEND_SECONDS`, `SESSION_TTL_SECONDS`, and `REGISTRATION_TTL_HOURS`. Render supplies `PORT`; locally it defaults to `4000`.
+
+OCR language data and the Tesseract core are installed from npm dependencies, so startup does not need a checked-in local model file. The service creates its temporary OCR cache at runtime. Legacy produce photos referenced from a local `.local-produce-images` directory will not be durable on Render's ephemeral filesystem; migrate any such assets to Cloudinary before relying on them in production. The `cloudflared` package is not used by the production startup path.
 
 ## Produce photo storage (Cloudinary)
 

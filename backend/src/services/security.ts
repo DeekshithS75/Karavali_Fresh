@@ -134,6 +134,9 @@ export async function getPhoneVerificationStatus(
   if (!challenge) throw new ApiError(404, 'verification_challenge_not_found');
   if (challenge.status === 'cancelled') return { status: 'cancelled', expiresAt: challenge.expiresAt.toISOString() };
   if (challenge.status === 'expired' || challenge.status === 'failed') return { status: 'expired', expiresAt: challenge.expiresAt.toISOString() };
+  // Completion consumes the challenge, but clients can still have an in-flight
+  // status poll. Preserve the verified result for those harmless follow-up polls.
+  if (challenge.status === 'verified' && challenge.consumedAt) return { status: 'verified', expiresAt: challenge.expiresAt.toISOString() };
   if (challenge.consumedAt) throw new ApiError(409, 'verification_already_completed');
   if (challenge.expiresAt <= new Date()) {
     await OtpChallengeModel.updateOne({ _id: challenge._id, consumedAt: null }, { $set: { status: 'expired', consumedAt: new Date() } });
@@ -167,7 +170,7 @@ export async function completePhoneVerification(id: string, provider: PhoneVerif
   const challenge = await OtpChallengeModel.findOneAndUpdate(
     { _id: id, status: 'verified', consumedAt: null, expiresAt: { $gt: new Date() } },
     { $set: { consumedAt: new Date() } }, { new: true },
-  ).select('+phoneCiphertext consumerId purpose phoneHash');
+  ).select('+phoneCiphertext farmerId registrationId consumerId purpose phoneHash');
   if (!challenge) throw new ApiError(409, 'verification_already_completed');
   return challenge;
 }

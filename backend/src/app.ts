@@ -172,7 +172,10 @@ function sendError(response: Response, error: unknown) {
   return response.status(500).json({ error: 'internal_error' });
 }
 
-app.get('/health', (_request, response) => response.json({ status: 'ok' }));
+app.get('/health', (_request, response) => {
+  if (mongoose.connection.readyState !== 1) return response.status(503).json({ status: 'unavailable' });
+  return response.json({ status: 'ok' });
+});
 
 app.post('/api/provider/exotel/calls/:token', async (request, response) => {
   try {
@@ -785,7 +788,7 @@ app.get('/api/farmer/requests', async (request, response) => {
       return ({
       id: String(item._id), listingId: String(item.listingId), listingName: item.listingName, ...(item.listingNameTranslations ? { listingNameTranslations: item.listingNameTranslations } : {}),
       buyerName: buyerNames.get(String(item.buyerId)) ?? 'Buyer', pricePerUnit: item.listingPricePerUnit, priceUnit: item.listingPriceUnit, requestedQuantity: item.requestedQuantity, unit: item.unit, status: item.status,
-      createdAt: item.createdAt, decidedAt: item.decidedAt ?? null, callStatus: call.status, callConfirmed: call.confirmed,
+      createdAt: item.createdAt, decidedAt: item.decidedAt ?? null, callStatus: call.status, callConfirmed: call.confirmed, callFailureCode: call.failureCode,
     });
     })) });
   } catch (error) { return sendError(response, error); }
@@ -850,12 +853,19 @@ app.patch('/api/farmer/requests/:requestId/decision', async (request, response) 
       const copy = notificationCopy(buyer?.preferredLanguage, 'request_decided', { decision });
       void sendAccountPush('consumer', recipientId, { ...copy, url: '/consumer?section=requests&requestId=' + request.params.requestId, notificationId: noticeId, requestId: request.params.requestId });
     }
-    const call = decidedStatus === 'accepted'
-      ? await initiateAcceptedRequestCall(new Types.ObjectId(request.params.requestId), farmer._id).catch(() => ({ status: 'unavailable' as const, confirmed: false }))
-      : { status: 'unavailable' as const, confirmed: false };
-    return response.json({ status: decidedStatus, callStatus: call.status, callConfirmed: call.confirmed });
+    return response.json({ status: decidedStatus });
   } catch (error) { return sendError(response, error); }
   finally { if (session) await session.endSession(); }
+});
+
+app.post('/api/farmer/requests/:requestId/call', async (request, response) => {
+  try {
+    const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
+    if (!Types.ObjectId.isValid(request.params.requestId)) throw new ApiError(404, 'produce_request_not_found');
+    const result = await initiateAcceptedRequestCall(new Types.ObjectId(request.params.requestId), farmer._id);
+    if (!result) throw new ApiError(404, 'produce_request_not_found');
+    return response.json(result);
+  } catch (error) { return sendError(response, error); }
 });
 
 app.post('/api/farmer/requests/:requestId/call/retry', async (request, response) => {
@@ -863,6 +873,8 @@ app.post('/api/farmer/requests/:requestId/call/retry', async (request, response)
     const { farmer } = await findAuthenticatedFarmer(request.header('authorization'));
     if (!Types.ObjectId.isValid(request.params.requestId)) throw new ApiError(404, 'produce_request_not_found');
     const result = await retryAcceptedRequestCall(new Types.ObjectId(request.params.requestId), farmer._id);
+    if (!result) throw new ApiError(404, 'produce_request_not_found');
+    if ('conflict' in result && result.conflict) throw new ApiError(409, 'call_attempt_not_retryable');
     return response.json(result);
   } catch (error) { return sendError(response, error); }
 });

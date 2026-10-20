@@ -198,7 +198,7 @@ export type FarmerProduce = {
 
 export type FarmerProduceRequest = {
   id: string; listingId: string; listingName: string; listingNameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; buyerName?: string; requestedQuantity: number; unit: string;
-  status: 'pending' | 'accepted' | 'rejected' | 'cancelled'; createdAt: string; decidedAt: string | null; callStatus?: 'queued' | 'initiated' | 'failed' | 'completed' | 'unavailable'; callConfirmed?: boolean;
+  status: 'pending' | 'accepted' | 'rejected' | 'cancelled'; createdAt: string; decidedAt: string | null; callStatus?: 'not_started' | 'queued' | 'initiated' | 'failed' | 'completed' | 'unavailable'; callConfirmed?: boolean; callFailureCode?: string | null;
 };
 
 export type FarmerNotification = { id: string; event: string; readAt: string | null; createdAt: string; request: FarmerProduceRequest | null };
@@ -369,10 +369,16 @@ export async function decideFarmerProduceRequest(requestId: string, decision: 'a
   });
 }
 
+export async function startFarmerRequestCall(requestId: string) {
+  const tokens = await readTokens();
+  if (!tokens) throw new FarmerAuthError('unauthorized');
+  return request<{ status: string; confirmed: boolean; failureCode?: string | null }>(`/api/farmer/requests/${encodeURIComponent(requestId)}/call`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.accessToken}` } });
+}
+
 export async function retryFarmerRequestCall(requestId: string) {
   const tokens = await readTokens();
   if (!tokens) throw new FarmerAuthError('unauthorized');
-  return request<{ status: string; confirmed: boolean }>(`/api/farmer/requests/${encodeURIComponent(requestId)}/call/retry`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.accessToken}` } });
+  return request<{ status: string; confirmed: boolean; failureCode?: string | null }>(`/api/farmer/requests/${encodeURIComponent(requestId)}/call/retry`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.accessToken}` } });
 }
 
 export async function getFarmerNotifications(page = 1) {

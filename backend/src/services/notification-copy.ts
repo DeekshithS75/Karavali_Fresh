@@ -42,7 +42,16 @@ export function notificationCopy(language: Language | undefined, event: Notifica
   if (data.failureCode === 'no-answer' || data.failureCode === 'busy') return lang === 'kn'
     ? { title: 'ಕರೆ ಸಂಪರ್ಕವಾಗಲಿಲ್ಲ', body: 'ಇನ್ನೊಬ್ಬರು ಕರೆ ಸ್ವೀಕರಿಸಲಿಲ್ಲ. ರೈತರು ಮತ್ತೆ ಪ್ರಯತ್ನಿಸಬಹುದು.' }
     : { title: 'Call did not connect', body: 'The other person did not answer. The farmer can retry the call.' };
+  if (event === 'call_failed') return lang === 'kn'
+    ? { title: 'ಕರೆ ಸಂಪರ್ಕವಾಗಲಿಲ್ಲ', body: 'ಖಾಸಗಿ ಕರೆ ಪೂರ್ಣಗೊಳ್ಳಲಿಲ್ಲ. ನಿಮ್ಮ ಉತ್ಪನ್ನ ವಿನಂತಿಯ ಸ್ಥಿತಿ ಬದಲಾಗಿಲ್ಲ.' }
+    : { title: 'Call could not connect', body: 'The private call could not be completed. Your produce request is still accepted.' };
+  if (data.decision === 'accepted') return lang === 'kn'
+    ? { title: 'ವಿನಂತಿಯ ಸ್ಥಿತಿ ಬದಲಾಗಿದೆ', body: 'ರೈತರು ನಿಮ್ಮ ಉತ್ಪನ್ನ ವಿನಂತಿಯನ್ನು ಒಪ್ಪಿದ್ದಾರೆ.' }
+    : { title: 'Request accepted', body: 'The farmer accepted your produce request.' };
+  if (data.decision === 'rejected') return lang === 'kn'
+    ? { title: 'ವಿನಂತಿಯ ಸ್ಥಿತಿ ಬದಲಾಗಿದೆ', body: 'ರೈತರು ನಿಮ್ಮ ಉತ್ಪನ್ನ ವಿನಂತಿಯನ್ನು ನಿರಾಕರಿಸಿದ್ದಾರೆ.' }
+    : { title: 'Request declined', body: 'The farmer declined your produce request.' };
   return lang === 'kn'
-    ? { title: 'ವಿನಂತಿಯ ಸ್ಥಿತಿ ಬದಲಾಗಿದೆ', body: data.decision === 'accepted' ? 'ರೈತರು ನಿಮ್ಮ ಉತ್ಪನ್ನ ವಿನಂತಿಯನ್ನು ಒಪ್ಪಿದ್ದಾರೆ.' : 'ರೈತರು ನಿಮ್ಮ ಉತ್ಪನ್ನ ವಿನಂತಿಯನ್ನು ನಿರಾಕರಿಸಿದ್ದಾರೆ.' }
-    : { title: 'Request status updated', body: data.decision === 'accepted' ? 'The farmer accepted your produce request.' : 'The farmer declined your produce request.' };
+    ? { title: 'ವಿನಂತಿಯ ಸ್ಥಿತಿ ಬದಲಾಗಿದೆ', body: 'ನಿಮ್ಮ ಉತ್ಪನ್ನ ವಿನಂತಿಯ ಸ್ಥಿತಿ ನವೀಕರಿಸಲಾಗಿದೆ.' }
+    : { title: 'Request status updated', body: 'Your produce request status was updated.' };
 }

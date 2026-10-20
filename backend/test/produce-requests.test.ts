@@ -26,24 +26,40 @@ async function server(context: TestContext) {
   context.mock.method(models.ConsumerSessionModel, 'findOne', async (query: { tokenHash: string }) => query.tokenHash === hmac(buyerToken)
     ? { consumerId: buyerId, revokedAt: null, expiresAt: new Date(Date.now() + 60_000) } : null);
   context.mock.method(models.ConsumerModel, 'findOne', () => ({
-    select() { return this; }, exec: async () => ({ _id: buyerId, fullName: 'Buyer', accountStatus: 'active' }),
+    select() { return this; }, lean() { return this; }, exec: async () => ({ _id: buyerId, fullName: 'Buyer', accountStatus: 'active' }),
   }) as never);
   context.mock.method(models.ConsumerModel, 'find', () => ({ select() { return this; }, lean() { return this; }, exec: async () => [{ _id: buyerId, fullName: 'Buyer' }] }) as never);
   context.mock.method(models.ConsumerModel, 'findById', () => query(() => ({ preferredLanguage: 'en' })) as never);
   context.mock.method(models.FarmerModel, 'findById', () => query(() => ({ preferredLanguage: 'en' })) as never);
-  context.mock.method(models.CallAttemptModel, 'findOne', () => query(() => null) as never);
-  context.mock.method(models.CallAttemptModel, 'create', async (records: Array<Record<string, any>>) => records.map((record) => ({ _id: new Types.ObjectId(), ...record })) as never);
-  context.mock.method(models.CallAttemptModel, 'updateOne', () => query(() => ({ modifiedCount: 1 })) as never);
+  context.mock.method(models.CallAttemptModel, 'findOne', (filter: Record<string, any>) => query(() => {
+    const matches = db.callAttempts.filter((item) => String(item.requestId) === String(filter.requestId) && (!filter.status?.$in || filter.status.$in.includes(item.status)));
+    return matches.sort((a, b) => Number(b.attempt ?? 0) - Number(a.attempt ?? 0))[0] ?? null;
+  }) as never);
+  context.mock.method(models.CallAttemptModel, 'create', async (records: Array<Record<string, any>>) => {
+    const saved = records.map((record) => ({ _id: new Types.ObjectId(), ...record }));
+    db.callAttempts.push(...saved);
+    return saved as never;
+  });
+  context.mock.method(models.CallAttemptModel, 'updateOne', (filter: Record<string, any>, update: Record<string, any>) => query(() => {
+    const item = db.callAttempts.find((attempt) => String(attempt._id) === String(filter._id) && (!filter.status || attempt.status === filter.status));
+    if (!item) return { modifiedCount: 0 };
+    Object.assign(item, update.$set ?? {});
+    for (const key of Object.keys(update.$unset ?? {})) delete item[key];
+    return { modifiedCount: 1 };
+  }) as never);
   context.mock.method(models.SessionModel, 'findOne', async (query: { tokenHash: string }) => query.tokenHash === hmac(farmerToken)
     ? { farmerId, revokedAt: null, expiresAt: new Date(Date.now() + 60_000) } : null);
   context.mock.method(models.FarmerModel, 'findById', () => ({
     ...farmer, select() { return this; }, lean() { return this; }, exec: async () => farmer,
   }) as never);
+  context.mock.method(models.FarmerModel, 'findOne', () => ({ select() { return this; }, lean() { return this; }, exec: async () => farmer }) as never);
+  context.mock.method(models.PushTokenModel, 'find', () => query(() => []) as never);
 
   const db = {
     listing: { _id: listingId, farmerId, name: 'Tomato', unit: 'kg', quantity: 5, requestVersion: 0, status: 'published', pricePerUnit: 20, priceUnit: 'kg', photos: [] as Array<Record<string, unknown>>, deleted: false },
     requests: [] as Array<Record<string, any>>,
     notifications: [] as Array<Record<string, any>>,
+    callAttempts: [] as Array<Record<string, any>>,
     extraListings: new Set<string>(),
     extraListingFarmers: new Map<string, Types.ObjectId>(),
   };
@@ -199,6 +215,33 @@ test('accept/reject decisions are owner-scoped, deduct once, and zero stock unpu
   assert.equal(rejected.status, 409);
   assert.equal(db.listing.quantity, 0);
   assert.equal(db.requests[1]!.status, 'cancelled');
+});
+
+test('acceptance does not call automatically; farmer explicitly starts and retries the call while request stays accepted', async (context) => {
+  const { call, db } = await server(context);
+  const request = { _id: new Types.ObjectId(), buyerId, listingId, farmerId, listingName: 'Tomato', requestedQuantity: 1, unit: 'kg', status: 'pending' };
+  db.requests.push(request);
+  const requestId = String(request._id);
+
+  const accepted = await call('/api/farmer/requests/' + requestId + '/decision', 'farmer', { decision: 'accepted' }, 'PATCH');
+  assert.equal(accepted.status, 200);
+  assert.equal(request.status, 'accepted');
+  assert.equal(db.callAttempts.length, 0);
+
+  assert.equal((await call('/api/farmer/requests/' + requestId + '/call', 'buyer', undefined, 'POST')).status, 401);
+  const started = await call('/api/farmer/requests/' + requestId + '/call', 'farmer', undefined, 'POST');
+  assert.equal(started.status, 200);
+  assert.equal((await started.json() as { status: string }).status, 'failed');
+  assert.equal(request.status, 'accepted');
+  assert.equal(db.callAttempts.length, 1);
+
+  const duplicate = await call('/api/farmer/requests/' + requestId + '/call', 'farmer', undefined, 'POST');
+  assert.equal(duplicate.status, 200);
+  assert.equal(db.callAttempts.length, 1);
+  const retry = await call('/api/farmer/requests/' + requestId + '/call/retry', 'farmer', undefined, 'POST');
+  assert.equal(retry.status, 200);
+  assert.equal(request.status, 'accepted');
+  assert.equal(db.callAttempts.length, 2);
 });
 
 test('concurrent acceptances do not oversell and buyer request responses never expose farmer phone numbers', async (context) => {

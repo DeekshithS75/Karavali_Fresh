@@ -18,6 +18,10 @@ test('notification copy uses farmer English or Kannada preference and falls back
   const tuluFallback = notificationCopy('tcy', 'request_created', { buyerName: 'Ravi', vegetableName: 'Tomato', quantity: 5, unit: 'kg' });
   assert.match(tuluFallback.body, /Accept or decline/);
   assert.match(notificationCopy('kn', 'request_decided', { decision: 'accepted' }).body, /ಒಪ್ಪಿದ್ದಾರೆ/);
+  assert.match(notificationCopy('en', 'request_decided', { decision: 'rejected' }).body, /farmer declined/);
+  assert.match(notificationCopy('en', 'call_failed', { failureCode: 'provider_timeout' }).body, /still accepted/);
+  assert.doesNotMatch(notificationCopy('en', 'call_failed', { failureCode: 'provider_timeout' }).body, /declined/i);
+  assert.doesNotMatch(notificationCopy('en', 'request_decided', {}).body, /declined/i);
 });
 
 function tokenQuery(tokens: Array<{ _id: string; token: string }>) {
