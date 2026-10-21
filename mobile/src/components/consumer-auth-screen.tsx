@@ -159,7 +159,7 @@ export function ConsumerAuthScreen({ page }: { page: Page }) {
         {errorKey ? <Text accessibilityRole="alert" style={styles.error}>{t(errorKey as never)}</Text> : null}
         <Pressable accessibilityRole="button" disabled={busy || restoringVerification || Boolean(challenge && !verified)} onPress={() => void submit()} style={[styles.primary, (busy || restoringVerification) && styles.disabled]}><Text style={styles.primaryText}>{t(busy || restoringVerification ? 'consumer.auth.working' : challenge ? 'consumer.auth.completeVerification' : isRegister ? 'consumer.auth.createAccount' : 'consumer.auth.signIn')}</Text></Pressable>
         <Pressable accessibilityRole="button" disabled={busy} onPress={() => router.replace(isRegister ? '/auth/consumer/login' : '/auth/consumer/register')} style={styles.link}><Text style={styles.linkText}>{t(isRegister ? 'consumer.auth.haveAccount' : 'consumer.auth.needAccount')}</Text></Pressable>
-        {!isRegister && __DEV__ ? <View style={styles.testLogin}>
+        {!isRegister ? <View style={styles.testLogin}>
           <Text style={styles.label}>{t('consumer.auth.devLogin')}</Text>
           <Text style={styles.note}>{t('consumer.auth.devLoginNote')}</Text>
           <Text style={styles.label}>{t('consumer.auth.devLoginSecret')}</Text>
