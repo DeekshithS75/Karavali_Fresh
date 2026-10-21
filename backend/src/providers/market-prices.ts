@@ -106,10 +106,17 @@ export async function requestDataGovPage(
   url.searchParams.set('filters[commodity]', commodity);
   let response: Response;
   try { response = await fetchImpl(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(20_000) }); }
-  catch { throw new MarketPriceProviderError('unavailable'); }
+  catch (error) {
+    const errorName = error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,40}$/.test(error.name) ? error.name : 'UnknownError';
+    process.stderr.write(`${JSON.stringify({ event: 'market_price_upstream_failure', kind: 'network', errorName })}\n`);
+    throw new MarketPriceProviderError('unavailable');
+  }
   if (response.status === 401 || response.status === 403) throw new MarketPriceProviderError('invalid_api_key');
   if (response.status === 429) throw new MarketPriceProviderError('rate_limited');
-  if (!response.ok) throw new MarketPriceProviderError('unavailable');
+  if (!response.ok) {
+    process.stderr.write(`${JSON.stringify({ event: 'market_price_upstream_failure', kind: 'http', status: response.status })}\n`);
+    throw new MarketPriceProviderError('unavailable');
+  }
   let body: unknown;
   try { body = await response.json(); } catch { throw new MarketPriceProviderError('response_invalid'); }
   return parseDataGovResponse(body, offset);
