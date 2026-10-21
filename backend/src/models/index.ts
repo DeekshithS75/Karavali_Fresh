@@ -23,7 +23,8 @@ const consumerSchema = new Schema({
   preferredLanguage: { type: String, enum: ['en', 'kn', 'tcy'], default: 'en' },
   phoneHash: { type: String, required: true, unique: true, index: true, select: false },
   phoneCiphertext: { type: String, required: true, select: false },
-  phoneVerifiedAt: { type: Date, required: true },
+  phoneVerifiedAt: { type: Date },
+  devLoginOnly: { type: Boolean, default: false, select: false },
   accountStatus: { type: String, enum: ['active'], required: true, default: 'active' },
 }, { timestamps: true, strict: 'throw' });
 

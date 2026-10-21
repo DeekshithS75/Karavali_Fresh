@@ -21,6 +21,9 @@ const schema = z.object({
   LIVEKIT_API_KEY: z.string().optional(),
   LIVEKIT_API_SECRET: z.string().optional(),
   DATA_GOV_IN_API_KEY: z.string().optional(),
+  DEV_CONSUMER_LOGIN_PHONE: z.string().optional(),
+  DEV_CONSUMER_LOGIN_SECRET: z.string().min(32).max(200).optional(),
+  DEV_CONSUMER_LOGIN_NAME: z.string().trim().min(2).max(100).default('Local Development Consumer'),
   MARKET_PRICE_FRESHNESS_DAYS: z.coerce.number().int().min(1).max(30).default(7),
   PRIVACY_NOTICE_VERSION: z.string().default('farmer-registration-phone-v2'),
   PRIVACY_NOTICE_EN: z.string().default('Your details and document are processed for farmer registration and document comparison. OCR is not proof of identity; control of the supplied phone number is checked separately through a missed call.'),
@@ -34,6 +37,9 @@ const schema = z.object({
 export const config = schema.parse(process.env);
 
 export function validateRuntimeConfig() {
+  if (Boolean(config.DEV_CONSUMER_LOGIN_PHONE) !== Boolean(config.DEV_CONSUMER_LOGIN_SECRET) && config.NODE_ENV !== 'development') {
+    throw new Error('DEV_CONSUMER_LOGIN_PHONE and DEV_CONSUMER_LOGIN_SECRET must be configured together outside development');
+  }
   if (config.NODE_ENV === 'production') {
     if (!config.MONGODB_URI) throw new Error('MONGODB_URI is required in production');
     if (config.MOBILE_ORIGIN === '*') throw new Error('MOBILE_ORIGIN must be restricted in production');

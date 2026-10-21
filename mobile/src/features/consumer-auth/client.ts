@@ -19,7 +19,7 @@ const verificationStorage = Platform.OS === 'web' ? AsyncStorage : {
 const PENDING_VERIFICATION_KEY = 'karavali-fresh.consumer.pending-phone-verification.v1';
 
 export class ConsumerAuthError extends Error {
-  constructor(readonly code: 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'emailRegistered' | 'invalidCredentials' | 'configurationIncomplete' | 'rateLimited' | 'validationFailed', readonly serverError: string | null = null) { super(code); }
+  constructor(readonly code: 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'emailRegistered' | 'invalidCredentials' | 'configurationIncomplete' | 'rateLimited' | 'validationFailed' | 'devLoginUnavailable', readonly serverError: string | null = null) { super(code); }
 }
 
 export type ConsumerListing = {
@@ -82,6 +82,7 @@ async function request<T>(path: string, init: RequestInit = {}) {
   catch (error) { if (error instanceof ConsumerAuthError) throw error; throw new ConsumerAuthError('network'); }
   if (!response.ok) {
     const body = await response.json().catch(() => ({})) as { error?: string };
+    if (body.error === 'dev_consumer_login_unavailable') throw new ConsumerAuthError('devLoginUnavailable');
     if (response.status === 401) throw new ConsumerAuthError('unauthorized');
     if (body.error === 'consumer_email_registered') throw new ConsumerAuthError('emailRegistered');
     if (body.error === 'consumer_credentials_invalid') throw new ConsumerAuthError('invalidCredentials');
@@ -138,6 +139,11 @@ export async function clearPendingConsumerVerification() {
 
 export async function startConsumerPhoneVerification(phone: string, purpose: 'login' | 'registration', fullName?: string) {
   return request<ConsumerChallenge>('/api/consumer/auth/phone-verification', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone, purpose, phoneVerificationConsent: true, ...(fullName ? { fullName } : {}) }) });
+}
+export async function loginDevConsumer(phone: string, secret: string) {
+  const result = await request<ConsumerSessionReply>('/api/consumer/auth/dev-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone, secret }) });
+  await storage.save(result);
+  return result.consumer;
 }
 export async function completeConsumerPhoneVerification(challengeId: string, fullName?: string, preferredLanguage?: 'en' | 'kn' | 'tcy') {
   const result = await request<ConsumerSessionReply>(`/api/consumer/auth/phone-verification/${encodeURIComponent(challengeId)}/complete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...(fullName ? { fullName } : {}), ...(preferredLanguage ? { preferredLanguage } : {}) }) });

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Linking, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { LanguageSelector } from '@/components/language-selector';
 import { MarketColors, ScreenFrame } from '@/components/marketplace-ui';
-import { ConsumerAuthError, clearPendingConsumerVerification, completeConsumerPhoneVerification, getConsumerPhoneVerificationStatus, getConsumerSessionState, getPendingConsumerVerification, savePendingConsumerVerification, startConsumerPhoneVerification, type ConsumerChallenge } from '@/features/consumer-auth/client';
+import { ConsumerAuthError, clearPendingConsumerVerification, completeConsumerPhoneVerification, getConsumerPhoneVerificationStatus, getConsumerSessionState, getPendingConsumerVerification, loginDevConsumer, savePendingConsumerVerification, startConsumerPhoneVerification, type ConsumerChallenge } from '@/features/consumer-auth/client';
 import { useLanguage } from '@/localization/LanguageProvider';
 
 type Page = 'login' | 'register' | 'forgot-password' | 'otp';
@@ -12,6 +12,7 @@ export function ConsumerAuthScreen({ page }: { page: Page }) {
   const { t, language } = useLanguage();
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
+  const [devLoginSecret, setDevLoginSecret] = useState('');
   const [challenge, setChallenge] = useState<ConsumerChallenge | null>(null);
   const [verified, setVerified] = useState(false);
   const [phoneConsent, setPhoneConsent] = useState(false);
@@ -126,6 +127,22 @@ export function ConsumerAuthScreen({ page }: { page: Page }) {
     } finally { setBusy(false); }
   };
 
+  const submitDevLogin = async () => {
+    setErrorKey(null);
+    setBusy(true);
+    try {
+      const digits = phone.replace(/\D/g, '');
+      const normalizedPhone = digits.length === 10 ? '+91' + digits : digits.length === 12 && digits.startsWith('91') ? '+' + digits : phone.trim();
+      await loginDevConsumer(normalizedPhone, devLoginSecret);
+      router.replace('/consumer');
+    } catch (error) {
+      const key = error instanceof ConsumerAuthError && error.code === 'devLoginUnavailable' ? 'consumer.auth.devLoginUnavailable'
+        : error instanceof ConsumerAuthError && error.serverError === 'consumer_account_not_found' ? 'consumer.auth.accountMissing'
+          : error instanceof ConsumerAuthError && error.code === 'network' ? 'consumer.auth.networkError' : 'consumer.auth.devLoginUnavailable';
+      setErrorKey(key);
+    } finally { setBusy(false); }
+  };
+
   return <ScreenFrame>
     <View style={styles.topBar}>
       <Pressable accessibilityRole="button" onPress={() => router.replace('/')} style={styles.back}><Text style={styles.backText}>‹ {t('navigation.welcome')}</Text></Pressable>
@@ -142,6 +159,14 @@ export function ConsumerAuthScreen({ page }: { page: Page }) {
         {errorKey ? <Text accessibilityRole="alert" style={styles.error}>{t(errorKey as never)}</Text> : null}
         <Pressable accessibilityRole="button" disabled={busy || restoringVerification || Boolean(challenge && !verified)} onPress={() => void submit()} style={[styles.primary, (busy || restoringVerification) && styles.disabled]}><Text style={styles.primaryText}>{t(busy || restoringVerification ? 'consumer.auth.working' : challenge ? 'consumer.auth.completeVerification' : isRegister ? 'consumer.auth.createAccount' : 'consumer.auth.signIn')}</Text></Pressable>
         <Pressable accessibilityRole="button" disabled={busy} onPress={() => router.replace(isRegister ? '/auth/consumer/login' : '/auth/consumer/register')} style={styles.link}><Text style={styles.linkText}>{t(isRegister ? 'consumer.auth.haveAccount' : 'consumer.auth.needAccount')}</Text></Pressable>
+        {!isRegister && __DEV__ ? <View style={styles.testLogin}>
+          <Text style={styles.label}>{t('consumer.auth.devLogin')}</Text>
+          <Text style={styles.note}>{t('consumer.auth.devLoginNote')}</Text>
+          <Text style={styles.label}>{t('consumer.auth.devLoginSecret')}</Text>
+          <TextInput accessibilityLabel={t('consumer.auth.devLoginSecret')} value={devLoginSecret} onChangeText={setDevLoginSecret} secureTextEntry autoCapitalize="none" autoCorrect={false} style={styles.input} />
+          <Pressable accessibilityRole="button" disabled={busy || !phone} onPress={() => void submitDevLogin()} style={[styles.secondary, (busy || !phone) && styles.disabled]}><Text style={styles.linkText}>{t('consumer.auth.devLoginButton')}</Text></Pressable>
+          {errorKey === 'consumer.auth.devLoginUnavailable' ? <Text accessibilityRole="alert" style={styles.error}>{t(errorKey)}</Text> : null}
+        </View> : null}
       </> : <Pressable accessibilityRole="button" onPress={() => router.replace('/auth/consumer/login')} style={styles.primary}><Text style={styles.primaryText}>{t('consumer.auth.backToLogin')}</Text></Pressable>}
     </View>
   </ScreenFrame>;
@@ -154,4 +179,5 @@ const styles = StyleSheet.create({
   card: { backgroundColor: MarketColors.card, borderRadius: 22, borderWidth: 1, borderColor: MarketColors.border, padding: 20, gap: 13 }, title: { color: MarketColors.text, fontSize: 25, fontWeight: '800' }, intro: { color: MarketColors.muted, fontSize: 14, lineHeight: 20 },
   field: { gap: 6 }, label: { color: MarketColors.text, fontSize: 13, fontWeight: '700' }, input: { minHeight: 49, borderWidth: 1, borderColor: MarketColors.border, borderRadius: 12, paddingHorizontal: 12, color: MarketColors.text, backgroundColor: MarketColors.background }, passwordRow: { minHeight: 49, flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: MarketColors.border, borderRadius: 12, paddingHorizontal: 12, backgroundColor: MarketColors.background }, password: { flex: 1, minHeight: 46, color: MarketColors.text }, toggle: { minHeight: 42, justifyContent: 'center', paddingLeft: 8 }, toggleText: { color: MarketColors.green, fontSize: 12, fontWeight: '700' },
   note: { color: MarketColors.muted, fontSize: 12, lineHeight: 18, backgroundColor: MarketColors.blueSoft, borderRadius: 11, padding: 10 }, error: { color: '#B42318', fontSize: 13, lineHeight: 18 }, primary: { minHeight: 50, alignItems: 'center', justifyContent: 'center', borderRadius: 13, backgroundColor: MarketColors.green, paddingHorizontal: 14 }, primaryText: { color: '#fff', fontSize: 14, fontWeight: '800' }, link: { minHeight: 44, alignItems: 'center', justifyContent: 'center' }, linkText: { color: MarketColors.greenDark, fontSize: 13, fontWeight: '700' }, disabled: { opacity: 0.55 },
+  testLogin: { borderTopWidth: 1, borderTopColor: MarketColors.border, paddingTop: 12, gap: 10 }, secondary: { minHeight: 46, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: MarketColors.green, borderRadius: 13, paddingHorizontal: 14 },
 });

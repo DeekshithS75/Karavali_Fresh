@@ -1,5 +1,6 @@
 import cors from 'cors';
 import express, { type ErrorRequestHandler, type Request, type Response } from 'express';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import helmet from 'helmet';
 import mongoose, { Types } from 'mongoose';
 import multer from 'multer';
@@ -192,6 +193,35 @@ app.post('/api/provider/exotel/calls/:token', async (request, response) => {
 const consumerSessionReply = async (consumer: { _id: Types.ObjectId; fullName: string; preferredLanguage?: 'en' | 'kn' | 'tcy' }) => ({
   ...(await createConsumerSession(consumer._id)),
   consumer: { id: String(consumer._id), fullName: consumer.fullName, preferredLanguage: consumer.preferredLanguage ?? 'en' },
+});
+
+app.post('/api/consumer/auth/dev-login', async (request, response) => {
+  try {
+    if (!config.DEV_CONSUMER_LOGIN_PHONE || (config.NODE_ENV !== 'development' && !config.DEV_CONSUMER_LOGIN_SECRET)) throw new ApiError(404, 'dev_consumer_login_unavailable');
+    await enforceStrictRateLimit(`consumer-dev-login-ip:${hmac(request.ip ?? 'unknown')}`, 10, 60_000);
+    const input = z.object({ phone: z.string().trim().min(1).max(32), secret: z.string().max(200).optional() }).parse(request.body);
+    const phone = normalizeIndianPhone(input.phone);
+    const allowedPhone = normalizeIndianPhone(config.DEV_CONSUMER_LOGIN_PHONE);
+    const secretMatches = config.NODE_ENV === 'development' || Boolean(input.secret && config.DEV_CONSUMER_LOGIN_SECRET
+      && timingSafeEqual(createHash('sha256').update(input.secret).digest(), createHash('sha256').update(config.DEV_CONSUMER_LOGIN_SECRET).digest()));
+    if (!phone || !allowedPhone || phone !== allowedPhone || !secretMatches) throw new ApiError(401, 'dev_consumer_login_unavailable');
+    if (!areSessionSecretsConfigured()) throw new ApiError(503, 'session_signing_not_configured');
+    const phoneHash = hashPhone(phone);
+    let consumer = await ConsumerModel.findOne({ phoneHash, accountStatus: 'active' }).select('_id fullName preferredLanguage').exec() as { _id: Types.ObjectId; fullName: string; preferredLanguage?: 'en' | 'kn' | 'tcy' } | null;
+    if (!consumer) {
+      try {
+        consumer = await ConsumerModel.create({
+          fullName: config.DEV_CONSUMER_LOGIN_NAME, preferredLanguage: 'en', phoneHash,
+          phoneCiphertext: encryptSecretValue(phone), devLoginOnly: true, accountStatus: 'active',
+        });
+      } catch (error) {
+        if (!(error instanceof Error && 'code' in error && error.code === 11000)) throw error;
+        consumer = await ConsumerModel.findOne({ phoneHash, accountStatus: 'active' }).select('_id fullName preferredLanguage').exec() as { _id: Types.ObjectId; fullName: string; preferredLanguage?: 'en' | 'kn' | 'tcy' } | null;
+      }
+    }
+    if (!consumer) throw new ApiError(503, 'dev_consumer_account_unavailable');
+    return response.json(await consumerSessionReply(consumer));
+  } catch (error) { return sendError(response, error); }
 });
 
 app.post('/api/consumer/auth/phone-verification', async (request, response) => {
