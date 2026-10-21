@@ -13,7 +13,7 @@ import { NaCallerError, normalizeIndianPhone } from './providers/otp.js';
 import { ProviderNotConfiguredError } from './providers/errors.js';
 import { ApiError, assertRegistrationAvailable, cancelPhoneVerification, completePhoneVerification, createSession, enforceRateLimit, enforceStrictRateLimit, findAuthenticatedFarmer, findAuthenticatedSession, getPhoneVerificationStatus, startPhoneVerification } from './services/security.js';
 import { createProducePhotoDeliveryUrl, deleteProducePhotos, readLegacyProducePhoto, readProducePhoto, storeProducePhotos, ProduceStorageError } from './services/produce-storage.js';
-import { marketPriceProvider, MarketPriceProviderError, marketRecordKey, matchesProduceCommodity, type MarketPriceRecord } from './providers/market-prices.js';
+import { DEFAULT_MARKET_ORIGIN_DISTRICT, marketPriceProvider, MarketPriceProviderError, marketRecordKey, matchesProduceCommodity, type MarketPriceRecord, type RelevantMarketRecords } from './providers/market-prices.js';
 import { buildFarmerMarketComparison, previousArrivalDate, type FarmerProduceForMarket } from './services/market-comparison.js';
 import { createConsumerSession, findAuthenticatedConsumer } from './services/consumer-auth.js';
 import { sendAccountPush } from './services/push-notifications.js';
@@ -725,34 +725,25 @@ app.get('/api/consumer/produce', async (request, response) => {
 });
 
 const consumerDemoVegetables = [
-  { id: 'demo-tomato', name: 'Tomato', farmerId: 'demo-farmer-1', farmerName: 'Ravi Shetty', quantity: 18, unit: 'kg', fallbackPrice: 32, photoKey: 'tomatoes', ageHours: 1 },
-  { id: 'demo-brinjal', name: 'Brinjal', farmerId: 'demo-farmer-2', farmerName: 'Lakshmi Poojary', quantity: 12, unit: 'kg', fallbackPrice: 38, photoKey: 'brinjal', ageHours: 2 },
-  { id: 'demo-okra', name: 'Okra', farmerId: 'demo-farmer-3', farmerName: 'Devananda Bhat', quantity: 9, unit: 'kg', fallbackPrice: 48, photoKey: 'okra', ageHours: 3 },
-  { id: 'demo-cucumber', name: 'Cucumber', farmerId: 'demo-farmer-4', farmerName: 'Meera Acharya', quantity: 15, unit: 'kg', fallbackPrice: 26, photoKey: 'cucumber', ageHours: 5 },
-  { id: 'demo-carrot', name: 'Carrot', farmerId: 'demo-farmer-5', farmerName: 'Santhosh Rai', quantity: 11, unit: 'kg', fallbackPrice: 60, photoKey: 'carrots', ageHours: 7 },
-  { id: 'demo-beans', name: 'Green beans', farmerId: 'demo-farmer-6', farmerName: 'Kavya Naik', quantity: 8, unit: 'kg', fallbackPrice: 72, photoKey: 'beans', ageHours: 9 },
+  { id: 'demo-tomato', name: 'Tomato', farmerId: 'demo-farmer-1', farmerName: 'Ravi Shetty', quantity: 18, unit: 'kg', fallbackPrice: 32, demoMandiPrice: 45, photoKey: 'tomatoes', ageHours: 1 },
+  { id: 'demo-brinjal', name: 'Brinjal', farmerId: 'demo-farmer-2', farmerName: 'Lakshmi Poojary', quantity: 12, unit: 'kg', fallbackPrice: 38, demoMandiPrice: 50, photoKey: 'brinjal', ageHours: 2 },
+  { id: 'demo-okra', name: 'Okra', farmerId: 'demo-farmer-3', farmerName: 'Devananda Bhat', quantity: 9, unit: 'kg', fallbackPrice: 48, demoMandiPrice: 65, photoKey: 'okra', ageHours: 3 },
+  { id: 'demo-cucumber', name: 'Cucumber', farmerId: 'demo-farmer-4', farmerName: 'Meera Acharya', quantity: 15, unit: 'kg', fallbackPrice: 26, demoMandiPrice: 35, photoKey: 'cucumber', ageHours: 5 },
+  { id: 'demo-carrot', name: 'Carrot', farmerId: 'demo-farmer-5', farmerName: 'Santhosh Rai', quantity: 11, unit: 'kg', fallbackPrice: 60, demoMandiPrice: 75, photoKey: 'carrots', ageHours: 7 },
+  { id: 'demo-beans', name: 'Green beans', farmerId: 'demo-farmer-6', farmerName: 'Kavya Naik', quantity: 8, unit: 'kg', fallbackPrice: 72, demoMandiPrice: 90, photoKey: 'beans', ageHours: 9 },
 ] as const;
 
 app.get('/api/consumer/demo-produce', async (request, response) => {
   try {
     await findAuthenticatedConsumer(request.header('authorization'));
-    const items = await Promise.all(consumerDemoVegetables.map(async (demo) => {
-      let marketComparison: unknown = null;
-      let pricePerUnit: number = demo.fallbackPrice;
-      try {
-        marketComparison = await createMarketComparison({ name: demo.name, unit: 'kg', pricePerUnit: demo.fallbackPrice });
-        const comparison = marketComparison as { status?: string; items?: Array<{ modalPrice: number | null; stale: boolean }> };
-        const marketPrice = comparison.status === 'available' ? comparison.items?.find((item) => item.modalPrice !== null && !item.stale)?.modalPrice : null;
-        if (typeof marketPrice === 'number' && Number.isFinite(marketPrice) && marketPrice > 0) pricePerUnit = Math.round(marketPrice);
-      } catch { /* Keep the clearly labeled sample price when the market source is unavailable. */ }
-      return {
+    const items = consumerDemoVegetables.map((demo) => ({
         id: demo.id, farmerId: demo.farmerId, isFarmerFollowed: false, isDemo: true, demoPhotoKey: demo.photoKey,
+        demoMandiPrice: demo.demoMandiPrice,
         name: demo.name, sourceLanguage: 'en', quantity: demo.quantity, unit: demo.unit,
-        pricePerUnit, priceUnit: 'kg', farmerName: demo.farmerName, marketComparison,
+        pricePerUnit: demo.fallbackPrice, priceUnit: 'kg', farmerName: demo.farmerName, marketComparison: null,
         distanceBand: null, photoUrl: null, existingRequest: null,
         createdAt: new Date(Date.now() - demo.ageHours * 60 * 60 * 1000).toISOString(),
-      };
-    }));
+      }));
     return response.json({ items });
   } catch (error) { return sendError(response, error); }
 });
@@ -1178,7 +1169,31 @@ const marketQuoteQuery = z.object({
 
 async function createMarketComparison(produce: FarmerProduceForMarket) {
   const names = [produce.name, ...Object.values(produce.nameTranslations ?? {})].filter((name): name is string => Boolean(name?.trim()));
-  const dataset = await marketPriceProvider.getRelevantRecords(names);
+  let dataset: RelevantMarketRecords;
+  let dataSourceMode: 'live' | 'saved' = 'live';
+  try {
+    dataset = await marketPriceProvider.getRelevantRecords(names);
+  } catch (error) {
+    if (!(error instanceof MarketPriceProviderError) || error.code !== 'unavailable') throw error;
+    const officialCommodity = resolveOfficialCommodity(names);
+    if (!officialCommodity) throw error;
+    const escapedCommodity = officialCommodity.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const stored = await MarketPriceObservationModel.find({
+      state: /^Karnataka$/i, commodity: { $regex: `^${escapedCommodity}$`, $options: 'i' },
+    }).sort({ arrivalDate: -1 }).limit(100).lean().exec() as unknown as Array<MarketPriceRecord & { fetchedAt: Date }>;
+    if (!stored.length) throw error;
+    const latestFetchedAt = stored.reduce((latest, record) => Math.max(latest, new Date(record.fetchedAt).getTime()), 0);
+    dataset = {
+      records: stored,
+      fetchedAt: new Date(latestFetchedAt).toISOString(),
+      truncated: false,
+      stage: 'karnataka_wide',
+      originDistrict: DEFAULT_MARKET_ORIGIN_DISTRICT,
+      commodity: officialCommodity,
+      freshnessDays: config.MARKET_PRICE_FRESHNESS_DAYS,
+    };
+    dataSourceMode = 'saved';
+  }
   const matching = dataset.records.filter((item) => matchesProduceCommodity(item, names));
   const previousQueries = matching.map((item) => ({ recordKey: marketRecordKey(item), arrivalDate: previousArrivalDate(item.arrivalDate) }));
   const previous = previousQueries.length
@@ -1191,7 +1206,7 @@ async function createMarketComparison(produce: FarmerProduceForMarket) {
     `${item.recordKey}|${item.arrivalDate}`,
     { ...item, arrivalDate: item.arrivalDate } as MarketPriceRecord,
   ]));
-  if (matching.length) await MarketPriceObservationModel.bulkWrite(matching.map((item) => {
+  if (matching.length && dataSourceMode === 'live') await MarketPriceObservationModel.bulkWrite(matching.map((item) => {
     const recordKey = marketRecordKey(item);
     return { updateOne: {
       filter: { recordKey, arrivalDate: item.arrivalDate },
@@ -1201,7 +1216,7 @@ async function createMarketComparison(produce: FarmerProduceForMarket) {
       upsert: true,
     } };
   }));
-  return buildFarmerMarketComparison(produce, dataset, previousByKeyAndDate);
+  return { ...buildFarmerMarketComparison(produce, dataset, previousByKeyAndDate), dataSourceMode };
 }
 
 app.get('/api/farmer/market-quote', async (request, response) => {

@@ -19,7 +19,6 @@ export default function FarmerAddPriceScreen() {
   const [retry, setRetry] = useState(0);
   const [marketQuote, setMarketQuote] = useState<FarmerMarketComparison | null>(null);
   const [marketQuoteLoading, setMarketQuoteLoading] = useState(false);
-  const [marketQuoteError, setMarketQuoteError] = useState<string | null>(null);
   const marketQuoteController = useRef<AbortController | null>(null);
   const autoQuoteFor = useRef<string | null>(null);
 
@@ -59,7 +58,6 @@ export default function FarmerAddPriceScreen() {
     const controller = new AbortController();
     marketQuoteController.current = controller;
     setMarketQuoteLoading(true);
-    setMarketQuoteError(null);
     try {
       setMarketQuote(await getFarmerMarketQuote({ commodity: item.name, nameTranslations: item.nameTranslations, unit: item.unit }, controller.signal));
     } catch (reason) {
@@ -68,11 +66,6 @@ export default function FarmerAddPriceScreen() {
         const state = await getFarmerSessionState();
         if (state === 'missing' || state === 'invalid') { router.replace('/auth/farmer'); return; }
       }
-      setMarketQuoteError(reason instanceof FarmerAuthError && reason.code === 'marketPriceNotConfigured' ? 'farmer.prices.notConfigured'
-        : reason instanceof FarmerAuthError && reason.code === 'marketPriceInvalidKey' ? 'farmer.prices.invalidKey'
-          : reason instanceof FarmerAuthError && reason.code === 'marketPriceRateLimited' ? 'farmer.prices.rateLimited'
-            : reason instanceof FarmerAuthError && reason.code === 'marketCommodityUnrecognized' ? 'farmer.prices.unavailableVegetable'
-              : 'farmer.prices.quoteError');
     } finally {
       if (marketQuoteController.current === controller) { marketQuoteController.current = null; setMarketQuoteLoading(false); }
     }
@@ -121,7 +114,7 @@ export default function FarmerAddPriceScreen() {
       </View> : item ? <>
         <Text style={styles.name}>{item.nameTranslations?.[language]?.trim() || item.name}</Text>
         <Text style={styles.help}>{t('produce.availableQuantity').replace('{quantity}', String(item.quantity)).replace('{unit}', t(`produce.unit.${item.unit}` as Parameters<typeof t>[0]))}</Text>
-        <View style={styles.marketQuoteBox}><Text style={styles.label}>{t('farmer.prices.shortReference')}</Text>{marketQuoteLoading ? <ActivityIndicator color={MarketColors.green} /> : marketQuote ? <FarmerMarketResults comparison={marketQuote} t={t} language={language} /> : <Text style={styles.help}>{t('farmer.prices.noReference')}</Text>}{marketQuoteError ? <Text accessibilityRole="alert" style={styles.error}>{t('farmer.prices.quoteError')}</Text> : null}<Pressable accessibilityRole="button" disabled={marketQuoteLoading || saving} onPress={() => void showMarketQuote()}><Text style={styles.quoteButtonText}>{t('farmer.prices.retry')}</Text></Pressable></View>
+        <View style={styles.marketQuoteBox}><Text style={styles.label}>{t('farmer.prices.shortReference')}</Text>{marketQuoteLoading ? <ActivityIndicator color={MarketColors.green} /> : marketQuote ? <FarmerMarketResults comparison={marketQuote} t={t} language={language} /> : <Text style={styles.help}>{t('farmer.prices.noReference')}</Text>}<Pressable accessibilityRole="button" disabled={marketQuoteLoading || saving} onPress={() => void showMarketQuote()}><Text style={styles.quoteButtonText}>{t('farmer.prices.retry')}</Text></Pressable></View>
         <View style={styles.field}>
           <Text style={styles.label}>{t('produce.sellingPrice')} *</Text>
           <View style={styles.priceRow}><Text style={styles.currency}>₹</Text><TextInput editable={!saving} value={price} onChangeText={(value) => { setPrice(value.replace(/[^\d.]/g, '')); setError(null); }} keyboardType="decimal-pad" inputMode="decimal" placeholder={t('produce.pricePlaceholder')} placeholderTextColor={MarketColors.muted} accessibilityLabel={`${t('produce.sellingPrice')} ${t(`produce.priceUnit.${item.unit}` as Parameters<typeof t>[0])}`} style={styles.input} /><Text style={styles.unit}>/ {t(`produce.priceUnit.${item.unit}` as Parameters<typeof t>[0])}</Text></View>

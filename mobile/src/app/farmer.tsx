@@ -247,7 +247,7 @@ export default function FarmerHomeScreen() {
               <Text style={styles.deleteButtonText}>{deletingId === item.id ? t('produce.deleteWorking') : t('produce.delete')}</Text>
             </Pressable>
             {marketErrors[item.id] ? <View style={styles.marketResultPanel}>
-              <Text accessibilityRole="alert" style={styles.marketMessage}>{t('farmer.prices.quoteError')}</Text>
+              <Text style={styles.marketMessage}>{t('farmer.prices.noReference')}</Text>
               <Pressable accessibilityRole="button" disabled={Boolean(marketLoadingId)} onPress={() => void compareMarketPrice(item)} style={styles.profileRetry}><Text style={styles.profileRetryText}>{t('farmer.prices.retry')}</Text></Pressable>
             </View> : null}
             {marketResults[item.id] ? <FarmerMarketResults comparison={marketResults[item.id]!} t={t} language={language} /> : null}

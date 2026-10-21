@@ -18,7 +18,7 @@ export function FarmerMarketResults({ comparison, t, language }: Props) {
 
   return <View style={styles.panel}>
     <Text style={styles.price}>{t('farmer.prices.simpleMandiPrice').replace('{price}', currency).replace('{unit}', t(`produce.priceUnit.${unit}` as TranslationKey))}</Text>
-    <Text style={styles.secondary}>{t('farmer.prices.reportedDate').replace('{date}', date)}{item.fallbackLevel === 'other_karnataka' ? ` · ${t('farmer.prices.regionalReference')}` : ''}</Text>
+    <Text style={styles.secondary}>{comparison.dataSourceMode === 'saved' ? `${t('farmer.prices.savedReference')} · ` : ''}{t('farmer.prices.reportedDate').replace('{date}', date)}{item.fallbackLevel === 'other_karnataka' ? ` · ${t('farmer.prices.regionalReference')}` : ''}</Text>
   </View>;
 }
 

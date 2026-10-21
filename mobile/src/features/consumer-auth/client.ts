@@ -27,6 +27,7 @@ export type ConsumerListing = {
   farmerId: string;
   isFarmerFollowed?: boolean;
   isDemo?: boolean;
+  demoMandiPrice?: number;
   demoPhotoKey?: 'tomatoes' | 'brinjal' | 'cucumber' | 'okra' | 'carrots' | 'beans';
   createdAt?: string;
   name: string;

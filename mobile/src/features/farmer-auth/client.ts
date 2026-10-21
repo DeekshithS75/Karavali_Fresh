@@ -227,6 +227,7 @@ export async function getFarmerProduce(signal?: AbortSignal, refreshKey?: string
 
 export type FarmerMarketComparison = {
   status: 'available' | 'stale' | 'missing';
+  dataSourceMode?: 'live' | 'saved';
   fetchedAt: string;
   sourceUnit: 'INR/quintal';
   originDistrict: string;
