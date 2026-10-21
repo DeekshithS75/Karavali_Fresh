@@ -8,7 +8,7 @@ import { LanguageSelector } from '@/components/language-selector';
 import { useLanguage } from '@/localization/LanguageProvider';
 import { getFarmerSessionState } from '@/features/farmer-auth/client';
 import type { FarmerSessionState } from '@/features/farmer-auth/session-lifecycle';
-import { getConsumerSessionState } from '@/features/consumer-auth/client';
+import { getConsumerSessionState, getPendingConsumerVerification } from '@/features/consumer-auth/client';
 
 const colors = {
   green: '#287A49',
@@ -50,11 +50,18 @@ export default function WelcomeScreen() {
 
   useEffect(() => {
     let active = true;
-    getFarmerSessionState().then((state) => {
+    getFarmerSessionState().then(async (state) => {
       if (!active) return;
       setSessionState(state);
       setRestoringFarmer(false);
-      if (state === 'valid') router.replace('/farmer');
+      if (state === 'valid') {
+        router.replace('/farmer');
+        return;
+      }
+      const pendingVerification = await getPendingConsumerVerification().catch(() => null);
+      if (active && pendingVerification) {
+        router.replace(pendingVerification.purpose === 'registration' ? '/auth/consumer/register' : '/auth/consumer/login');
+      }
     });
     return () => { active = false; };
   }, []);

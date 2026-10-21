@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Linking, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { LanguageSelector } from '@/components/language-selector';
 import { MarketColors, ScreenFrame } from '@/components/marketplace-ui';
-import { ConsumerAuthError, completeConsumerPhoneVerification, getConsumerPhoneVerificationStatus, getConsumerSessionState, startConsumerPhoneVerification, type ConsumerChallenge } from '@/features/consumer-auth/client';
+import { ConsumerAuthError, clearPendingConsumerVerification, completeConsumerPhoneVerification, getConsumerPhoneVerificationStatus, getConsumerSessionState, getPendingConsumerVerification, savePendingConsumerVerification, startConsumerPhoneVerification, type ConsumerChallenge } from '@/features/consumer-auth/client';
 import { useLanguage } from '@/localization/LanguageProvider';
 
 type Page = 'login' | 'register' | 'forgot-password' | 'otp';
@@ -17,9 +17,29 @@ export function ConsumerAuthScreen({ page }: { page: Page }) {
   const [phoneConsent, setPhoneConsent] = useState(false);
   const [errorKey, setErrorKey] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [restoringVerification, setRestoringVerification] = useState(page === 'login' || page === 'register');
   const completingRef = useRef(false);
   const isRegister = page === 'register';
   const unsupportedPage = page === 'forgot-password' || page === 'otp';
+
+  useEffect(() => {
+    if (page !== 'login' && page !== 'register') {
+      setRestoringVerification(false);
+      return;
+    }
+    let active = true;
+    setRestoringVerification(true);
+    void getPendingConsumerVerification().then((pending) => {
+      if (!active || !pending || pending.purpose !== (page === 'register' ? 'registration' : 'login')) return;
+      setPhone(pending.phone);
+      setFullName(pending.fullName);
+      setPhoneConsent(true);
+      setChallenge(pending.challenge);
+    }).catch(() => undefined).finally(() => {
+      if (active) setRestoringVerification(false);
+    });
+    return () => { active = false; };
+  }, [page]);
 
   useEffect(() => {
     if (!challenge) return;
@@ -32,6 +52,7 @@ export function ConsumerAuthScreen({ page }: { page: Page }) {
         if (result.status === 'verified') { setVerified(true); return; }
         if (result.status === 'expired' || result.status === 'cancelled') {
           setChallenge(null);
+          void clearPendingConsumerVerification().catch(() => undefined);
           setErrorKey('consumer.auth.verificationExpired');
           return;
         }
@@ -39,6 +60,7 @@ export function ConsumerAuthScreen({ page }: { page: Page }) {
         if (!active) return;
         if (error instanceof ConsumerAuthError && error.serverError === 'verification_challenge_not_found') {
           setChallenge(null);
+          void clearPendingConsumerVerification().catch(() => undefined);
           setErrorKey('consumer.auth.verificationExpired');
           return;
         }
@@ -62,11 +84,16 @@ export function ConsumerAuthScreen({ page }: { page: Page }) {
       if (completingRef.current) return;
       completingRef.current = true;
       setBusy(true);
-      try { await completeConsumerPhoneVerification(challenge.challengeId, isRegister ? fullName.trim() : undefined, language); router.replace('/consumer'); }
+      try {
+        await completeConsumerPhoneVerification(challenge.challengeId, isRegister ? fullName.trim() : undefined, language);
+        await clearPendingConsumerVerification().catch(() => undefined);
+        router.replace('/consumer');
+      }
       catch (error) {
         if (error instanceof ConsumerAuthError && error.serverError === 'verification_challenge_not_found') {
           setChallenge(null);
           setVerified(false);
+          await clearPendingConsumerVerification().catch(() => undefined);
           setErrorKey('consumer.auth.verificationExpired');
         } else setErrorKey('consumer.auth.networkError');
       }
@@ -80,7 +107,11 @@ export function ConsumerAuthScreen({ page }: { page: Page }) {
     if (!phoneConsent) { setErrorKey('consumer.auth.consentRequired'); return; }
     setBusy(true);
     try {
-      setChallenge(await startConsumerPhoneVerification(normalizedPhone, isRegister ? 'registration' : 'login', fullName.trim()));
+      const purpose = isRegister ? 'registration' : 'login';
+      const normalizedName = fullName.trim();
+      const nextChallenge = await startConsumerPhoneVerification(normalizedPhone, purpose, normalizedName);
+      await savePendingConsumerVerification({ challenge: nextChallenge, phone: normalizedPhone, purpose, fullName: normalizedName }).catch(() => undefined);
+      setChallenge(nextChallenge);
     } catch (error) {
       const key = error instanceof ConsumerAuthError && error.code === 'rateLimited' ? 'consumer.auth.rateLimited'
         : error instanceof ConsumerAuthError && error.code === 'configurationIncomplete' ? 'consumer.auth.notConfigured'
@@ -109,7 +140,7 @@ export function ConsumerAuthScreen({ page }: { page: Page }) {
         {isRegister ? <View style={styles.field}><Text style={styles.label}>{t('consumer.auth.fullName')}</Text><TextInput accessibilityLabel={t('consumer.auth.fullName')} value={fullName} onChangeText={setFullName} autoCapitalize="words" style={styles.input} /></View> : null}
         {!challenge ? <><View style={styles.field}><Text style={styles.label}>{t('consumer.auth.phone')}</Text><TextInput accessibilityLabel={t('consumer.auth.phone')} value={phone} onChangeText={setPhone} keyboardType="phone-pad" autoComplete="tel" style={styles.input} /></View><Pressable accessibilityRole="checkbox" accessibilityState={{ checked: phoneConsent }} onPress={() => setPhoneConsent((value) => !value)} style={styles.note}><Text>{phoneConsent ? '☑' : '□'} {t('consumer.auth.providerNote')}</Text></Pressable></> : <View style={styles.note}><Text style={styles.intro}>{challenge.instruction}</Text><Text style={styles.title}>{challenge.callNumber}</Text><Pressable accessibilityRole="button" onPress={() => void Linking.openURL(`tel:${challenge.callNumber}`)} style={styles.link}><Text style={styles.linkText}>{t('consumer.auth.callToVerify')}</Text></Pressable><Text style={styles.note}>{t(verified ? 'consumer.auth.verified' : 'consumer.auth.waiting')}</Text></View>}
         {errorKey ? <Text accessibilityRole="alert" style={styles.error}>{t(errorKey as never)}</Text> : null}
-        <Pressable accessibilityRole="button" disabled={busy || Boolean(challenge && !verified)} onPress={() => void submit()} style={[styles.primary, busy && styles.disabled]}><Text style={styles.primaryText}>{t(busy ? 'consumer.auth.working' : challenge ? 'consumer.auth.completeVerification' : isRegister ? 'consumer.auth.createAccount' : 'consumer.auth.signIn')}</Text></Pressable>
+        <Pressable accessibilityRole="button" disabled={busy || restoringVerification || Boolean(challenge && !verified)} onPress={() => void submit()} style={[styles.primary, (busy || restoringVerification) && styles.disabled]}><Text style={styles.primaryText}>{t(busy || restoringVerification ? 'consumer.auth.working' : challenge ? 'consumer.auth.completeVerification' : isRegister ? 'consumer.auth.createAccount' : 'consumer.auth.signIn')}</Text></Pressable>
         <Pressable accessibilityRole="button" disabled={busy} onPress={() => router.replace(isRegister ? '/auth/consumer/login' : '/auth/consumer/register')} style={styles.link}><Text style={styles.linkText}>{t(isRegister ? 'consumer.auth.haveAccount' : 'consumer.auth.needAccount')}</Text></Pressable>
       </> : <Pressable accessibilityRole="button" onPress={() => router.replace('/auth/consumer/login')} style={styles.primary}><Text style={styles.primaryText}>{t('consumer.auth.backToLogin')}</Text></Pressable>}
     </View>

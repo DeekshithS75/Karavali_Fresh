@@ -11,6 +11,12 @@ const storage = createSessionStorage(CONSUMER_SESSION_KEY, Platform.OS === 'web'
   setItem: (key: string, value: string) => SecureStore.setItemAsync(key, value),
   removeItem: (key: string) => SecureStore.deleteItemAsync(key),
 });
+const verificationStorage = Platform.OS === 'web' ? AsyncStorage : {
+  getItem: (key: string) => SecureStore.getItemAsync(key),
+  setItem: (key: string, value: string) => SecureStore.setItemAsync(key, value),
+  removeItem: (key: string) => SecureStore.deleteItemAsync(key),
+};
+const PENDING_VERIFICATION_KEY = 'karavali-fresh.consumer.pending-phone-verification.v1';
 
 export class ConsumerAuthError extends Error {
   constructor(readonly code: 'apiUrlMissing' | 'urlNotAllowed' | 'network' | 'unauthorized' | 'rejected' | 'emailRegistered' | 'invalidCredentials' | 'configurationIncomplete' | 'rateLimited' | 'validationFailed', readonly serverError: string | null = null) { super(code); }
@@ -91,6 +97,45 @@ async function request<T>(path: string, init: RequestInit = {}) {
 
 type ConsumerSessionReply = SessionTokens & { expiresAt: string; consumer: { id: string; fullName: string; preferredLanguage?: 'en' | 'kn' | 'tcy' } };
 export type ConsumerChallenge = { challengeId: string; callNumber: string; instruction: string; expiresAt: string; status: 'pending' };
+export type PendingConsumerVerification = {
+  challenge: ConsumerChallenge;
+  phone: string;
+  purpose: 'login' | 'registration';
+  fullName: string;
+};
+
+export async function savePendingConsumerVerification(value: PendingConsumerVerification) {
+  await verificationStorage.setItem(PENDING_VERIFICATION_KEY, JSON.stringify(value));
+}
+
+export async function getPendingConsumerVerification(): Promise<PendingConsumerVerification | null> {
+  const serialized = await verificationStorage.getItem(PENDING_VERIFICATION_KEY);
+  if (!serialized) return null;
+  try {
+    const value = JSON.parse(serialized) as Partial<PendingConsumerVerification>;
+    const challenge = value.challenge as Partial<ConsumerChallenge> | undefined;
+    if (value.purpose !== 'login' && value.purpose !== 'registration') throw new Error('invalid_pending_verification');
+    if (typeof value.phone !== 'string' || typeof value.fullName !== 'string' || !challenge
+      || typeof challenge.challengeId !== 'string' || typeof challenge.callNumber !== 'string'
+      || typeof challenge.instruction !== 'string' || typeof challenge.expiresAt !== 'string'
+      || challenge.status !== 'pending' || !Number.isFinite(Date.parse(challenge.expiresAt))) {
+      throw new Error('invalid_pending_verification');
+    }
+    if (Date.parse(challenge.expiresAt) <= Date.now()) {
+      await clearPendingConsumerVerification();
+      return null;
+    }
+    return value as PendingConsumerVerification;
+  } catch {
+    await clearPendingConsumerVerification();
+    return null;
+  }
+}
+
+export async function clearPendingConsumerVerification() {
+  await verificationStorage.removeItem(PENDING_VERIFICATION_KEY);
+}
+
 export async function startConsumerPhoneVerification(phone: string, purpose: 'login' | 'registration', fullName?: string) {
   return request<ConsumerChallenge>('/api/consumer/auth/phone-verification', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone, purpose, phoneVerificationConsent: true, ...(fullName ? { fullName } : {}) }) });
 }
