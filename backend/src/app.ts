@@ -202,6 +202,7 @@ app.post('/api/consumer/auth/phone-verification', async (request, response) => {
     if (!phone) throw new ApiError(400, 'invalid_phone');
     const phoneHash = hashPhone(phone);
     const consumer = await ConsumerModel.findOne({ phoneHash, accountStatus: 'active' }).select('_id').lean().exec() as { _id: Types.ObjectId } | null;
+    if (input.purpose === 'login' && !consumer) throw new ApiError(404, 'consumer_account_not_found');
     if (input.purpose === 'registration' && consumer) throw new ApiError(409, 'consumer_phone_registered');
     const challenge = await startPhoneVerification(phone, input.purpose === 'login' ? 'consumer_login' : 'consumer_registration', consumer ? { consumerId: consumer._id } : {});
     return response.status(202).json(challenge);
