@@ -114,7 +114,7 @@ export async function requestDataGovPage(
       const cause = error && typeof error === 'object' && 'cause' in error ? error.cause : null;
       const rawCauseCode = cause && typeof cause === 'object' && 'code' in cause ? cause.code : null;
       const causeCode = typeof rawCauseCode === 'string' && /^[A-Z0-9_]{1,40}$/.test(rawCauseCode) ? rawCauseCode : undefined;
-      const retryable = ['ECONNRESET', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'EAI_AGAIN', 'ENETUNREACH'].includes(causeCode ?? '');
+      const retryable = ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH'].includes(causeCode ?? '');
       process.stderr.write(`${JSON.stringify({ event: 'market_price_upstream_failure', kind: 'network', errorName, ...(causeCode ? { causeCode } : {}), attempt: attempt + 1 })}\n`);
       if (attempt === 0 && retryable) continue;
       throw new MarketPriceProviderError('unavailable');
