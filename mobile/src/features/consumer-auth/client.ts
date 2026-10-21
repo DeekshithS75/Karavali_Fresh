@@ -26,6 +26,9 @@ export type ConsumerListing = {
   id: string;
   farmerId: string;
   isFarmerFollowed?: boolean;
+  isDemo?: boolean;
+  demoPhotoKey?: 'tomatoes' | 'brinjal' | 'cucumber' | 'okra' | 'carrots' | 'beans';
+  createdAt?: string;
   name: string;
   sourceLanguage: 'en' | 'kn' | 'tcy';
   nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>;
@@ -217,6 +220,14 @@ export async function getConsumerListings(query: ConsumerListingQuery = {}, sign
   if (query.distanceKm !== undefined) params.set('distanceKm', String(query.distanceKm));
   const result = await request<{ items: ConsumerListing[]; page: number; hasMore: boolean }>(`/api/consumer/produce?${params.toString()}`, { headers: { Authorization: `Bearer ${tokens.accessToken}` }, signal });
   return { ...result, items: result.items.map((item) => ({ ...item, photoUrl: item.photoUrl ? apiUrl(item.photoUrl) : null })) };
+}
+
+export async function getConsumerDemoListings(search = '') {
+  const tokens = await storage.read();
+  if (!tokens) throw new ConsumerAuthError('unauthorized');
+  const result = await request<{ items: ConsumerListing[] }>('/api/consumer/demo-produce', { headers: { Authorization: `Bearer ${tokens.accessToken}` } });
+  const normalizedSearch = search.trim().toLocaleLowerCase('en-IN');
+  return result.items.filter((item) => !normalizedSearch || item.name.toLocaleLowerCase('en-IN').includes(normalizedSearch));
 }
 
 export async function subscribeToFarmer(farmerId: string) {

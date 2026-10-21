@@ -59,6 +59,7 @@ function farmerAuthErrorText(error: unknown, page: Page): TranslationKey {
   if (error.code === 'documentFieldsMissing') return 'farmerAuth.documentFieldsMissing';
   if (error.code === 'documentUnreadable') return 'farmerAuth.documentUnreadable';
   if (error.code === 'verificationNotConfigured') return 'farmerAuth.phoneVerificationProviderMissing';
+  if (error.code === 'verificationCreditsExhausted') return 'farmerAuth.phoneVerificationCreditsExhausted';
   if (error.code === 'verificationProviderFailure') return 'farmerAuth.phoneVerificationProviderFailure';
   if (error.code === 'verificationInProgress') return 'farmerAuth.verificationInProgress';
   if (error.code === 'rateLimited') return 'farmerAuth.rateLimited';

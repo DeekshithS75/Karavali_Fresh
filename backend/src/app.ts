@@ -686,6 +686,7 @@ app.get('/api/consumer/produce', async (request, response) => {
       location?: { status: string; latitude?: number; longitude?: number; accuracyMeters?: number };
       locationPoint?: { type: 'Point'; coordinates: [number, number] };
       photos: Array<{ mimeType: string }>;
+      createdAt: Date;
     }>;
     const hasMore = records.length > input.limit;
     const pageRecords = records.slice(0, input.limit);
@@ -707,6 +708,7 @@ app.get('/api/consumer/produce', async (request, response) => {
       } catch { /* A missing or unavailable market source is represented explicitly to consumers. */ }
       return {
         id: String(record._id), farmerId: String(record.farmerId), isFarmerFollowed: followedIds.has(String(record.farmerId)), name: record.name, sourceLanguage: record.sourceLanguage ?? 'en',
+        createdAt: record.createdAt,
         ...(record.nameTranslations ? { nameTranslations: record.nameTranslations } : {}),
         quantity: record.quantity, unit: record.unit, pricePerUnit: record.pricePerUnit, priceUnit: record.priceUnit,
         farmerName: farmerNames.get(String((record as { farmerId?: Types.ObjectId }).farmerId)) ?? null,
@@ -722,6 +724,39 @@ app.get('/api/consumer/produce', async (request, response) => {
   } catch (error) { return sendError(response, error); }
 });
 
+const consumerDemoVegetables = [
+  { id: 'demo-tomato', name: 'Tomato', farmerId: 'demo-farmer-1', farmerName: 'Ravi Shetty', quantity: 18, unit: 'kg', fallbackPrice: 32, photoKey: 'tomatoes', ageHours: 1 },
+  { id: 'demo-brinjal', name: 'Brinjal', farmerId: 'demo-farmer-2', farmerName: 'Lakshmi Poojary', quantity: 12, unit: 'kg', fallbackPrice: 38, photoKey: 'brinjal', ageHours: 2 },
+  { id: 'demo-okra', name: 'Okra', farmerId: 'demo-farmer-3', farmerName: 'Devananda Bhat', quantity: 9, unit: 'kg', fallbackPrice: 48, photoKey: 'okra', ageHours: 3 },
+  { id: 'demo-cucumber', name: 'Cucumber', farmerId: 'demo-farmer-4', farmerName: 'Meera Acharya', quantity: 15, unit: 'kg', fallbackPrice: 26, photoKey: 'cucumber', ageHours: 5 },
+  { id: 'demo-carrot', name: 'Carrot', farmerId: 'demo-farmer-5', farmerName: 'Santhosh Rai', quantity: 11, unit: 'kg', fallbackPrice: 60, photoKey: 'carrots', ageHours: 7 },
+  { id: 'demo-beans', name: 'Green beans', farmerId: 'demo-farmer-6', farmerName: 'Kavya Naik', quantity: 8, unit: 'kg', fallbackPrice: 72, photoKey: 'beans', ageHours: 9 },
+] as const;
+
+app.get('/api/consumer/demo-produce', async (request, response) => {
+  try {
+    await findAuthenticatedConsumer(request.header('authorization'));
+    const items = await Promise.all(consumerDemoVegetables.map(async (demo) => {
+      let marketComparison: unknown = null;
+      let pricePerUnit: number = demo.fallbackPrice;
+      try {
+        marketComparison = await createMarketComparison({ name: demo.name, unit: 'kg', pricePerUnit: demo.fallbackPrice });
+        const comparison = marketComparison as { status?: string; items?: Array<{ modalPrice: number | null; stale: boolean }> };
+        const marketPrice = comparison.status === 'available' ? comparison.items?.find((item) => item.modalPrice !== null && !item.stale)?.modalPrice : null;
+        if (typeof marketPrice === 'number' && Number.isFinite(marketPrice) && marketPrice > 0) pricePerUnit = Math.round(marketPrice);
+      } catch { /* Keep the clearly labeled sample price when the market source is unavailable. */ }
+      return {
+        id: demo.id, farmerId: demo.farmerId, isFarmerFollowed: false, isDemo: true, demoPhotoKey: demo.photoKey,
+        name: demo.name, sourceLanguage: 'en', quantity: demo.quantity, unit: demo.unit,
+        pricePerUnit, priceUnit: 'kg', farmerName: demo.farmerName, marketComparison,
+        distanceBand: null, photoUrl: null, existingRequest: null,
+        createdAt: new Date(Date.now() - demo.ageHours * 60 * 60 * 1000).toISOString(),
+      };
+    }));
+    return response.json({ items });
+  } catch (error) { return sendError(response, error); }
+});
+
 app.get('/api/consumer/produce/:produceId', async (request, response) => {
   try {
     const { consumer } = await findAuthenticatedConsumer(request.header('authorization'));
@@ -729,10 +764,11 @@ app.get('/api/consumer/produce/:produceId', async (request, response) => {
     const record = await ProduceModel.findOne({
       _id: request.params.produceId, status: 'published', quantity: { $gt: 0 }, pricePerUnit: { $gt: 0 },
       priceUnit: { $in: ['kg', 'quintal', 'bunch', 'pieces'] },
-    }).select('_id farmerId name sourceLanguage nameTranslations quantity unit pricePerUnit priceUnit photos').lean().exec() as {
+    }).select('_id farmerId name sourceLanguage nameTranslations quantity unit pricePerUnit priceUnit photos createdAt').lean().exec() as {
       _id: Types.ObjectId; farmerId: Types.ObjectId; name: string; sourceLanguage: 'en' | 'kn' | 'tcy';
       nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; quantity: number; unit: string;
       pricePerUnit: number; priceUnit: string; photos: Array<{ mimeType: string }>;
+      createdAt: Date;
     } | null;
     if (!record) throw new ApiError(404, 'produce_not_available');
     const farmer = await FarmerModel.findById(record.farmerId).select('fullName').lean().exec() as { fullName: string } | null;
@@ -743,7 +779,7 @@ app.get('/api/consumer/produce/:produceId', async (request, response) => {
     try { marketComparison = await createMarketComparison({ name: record.name, nameTranslations: record.nameTranslations, unit: record.priceUnit as FarmerProduceForMarket['unit'], pricePerUnit: record.pricePerUnit }); }
     catch { /* The client displays an explicit unavailable state. */ }
     return response.json({ item: {
-      id: String(record._id), farmerId: String(record.farmerId), name: record.name, sourceLanguage: record.sourceLanguage ?? 'en',
+      id: String(record._id), farmerId: String(record.farmerId), createdAt: record.createdAt, name: record.name, sourceLanguage: record.sourceLanguage ?? 'en',
       ...(record.nameTranslations ? { nameTranslations: record.nameTranslations } : {}),
       quantity: record.quantity, unit: record.unit, pricePerUnit: record.pricePerUnit, priceUnit: record.priceUnit,
       farmerName: farmer?.fullName ?? null, marketComparison,
