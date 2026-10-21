@@ -104,13 +104,23 @@ export async function requestDataGovPage(
   url.searchParams.set('filters[state]', 'Karnataka');
   if (district) url.searchParams.set('filters[district]', district);
   url.searchParams.set('filters[commodity]', commodity);
-  let response: Response;
-  try { response = await fetchImpl(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(20_000) }); }
-  catch (error) {
-    const errorName = error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,40}$/.test(error.name) ? error.name : 'UnknownError';
-    process.stderr.write(`${JSON.stringify({ event: 'market_price_upstream_failure', kind: 'network', errorName })}\n`);
-    throw new MarketPriceProviderError('unavailable');
+  let response: Response | undefined;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      response = await fetchImpl(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(20_000) });
+      break;
+    } catch (error) {
+      const errorName = error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,40}$/.test(error.name) ? error.name : 'UnknownError';
+      const cause = error && typeof error === 'object' && 'cause' in error ? error.cause : null;
+      const rawCauseCode = cause && typeof cause === 'object' && 'code' in cause ? cause.code : null;
+      const causeCode = typeof rawCauseCode === 'string' && /^[A-Z0-9_]{1,40}$/.test(rawCauseCode) ? rawCauseCode : undefined;
+      const retryable = ['ECONNRESET', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'EAI_AGAIN', 'ENETUNREACH'].includes(causeCode ?? '');
+      process.stderr.write(`${JSON.stringify({ event: 'market_price_upstream_failure', kind: 'network', errorName, ...(causeCode ? { causeCode } : {}), attempt: attempt + 1 })}\n`);
+      if (attempt === 0 && retryable) continue;
+      throw new MarketPriceProviderError('unavailable');
+    }
   }
+  if (!response) throw new MarketPriceProviderError('unavailable');
   if (response.status === 401 || response.status === 403) throw new MarketPriceProviderError('invalid_api_key');
   if (response.status === 429) throw new MarketPriceProviderError('rate_limited');
   if (!response.ok) {
