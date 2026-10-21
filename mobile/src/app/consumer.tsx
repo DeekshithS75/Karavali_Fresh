@@ -8,7 +8,7 @@ import { LanguageSelector } from '@/components/language-selector';
 import { EmptyState, MarketColors, ScreenFrame, SectionHeading } from '@/components/marketplace-ui';
 import { useLanguage } from '@/localization/LanguageProvider';
 import { registerAccountForPush } from '@/features/push-notifications';
-import { ConsumerAuthError, getConsumerListings, getConsumerNotifications, getConsumerPhotoHeaders, getConsumerProfile, getConsumerRequests, getConsumerSessionState, logoutConsumer, markConsumerNotificationRead, setConsumerPreferredLanguage, shareConsumerRequestPhone, type ConsumerListing, type ConsumerListingQuery, type ConsumerNotification, type ConsumerProduceRequest } from '@/features/consumer-auth/client';
+import { ConsumerAuthError, getConsumerListings, getConsumerNotifications, getConsumerPhotoHeaders, getConsumerProfile, getConsumerRequests, getConsumerSessionState, logoutConsumer, markConsumerNotificationRead, setConsumerPreferredLanguage, shareConsumerRequestPhone, subscribeToFarmer, unsubscribeFromFarmer, type ConsumerListing, type ConsumerListingQuery, type ConsumerNotification, type ConsumerProduceRequest } from '@/features/consumer-auth/client';
 import { localizedProduceName } from '@/localization/produce-name';
 
 type Sort = NonNullable<ConsumerListingQuery['sort']>;
@@ -39,6 +39,7 @@ export default function ConsumerHomeScreen() {
   const selectedRequestId = params.requestId ?? null;
   const [myRequests, setMyRequests] = useState<ConsumerProduceRequest[]>([]);
   const [sharingPhoneId, setSharingPhoneId] = useState<string | null>(null);
+  const [subscriptionBusyId, setSubscriptionBusyId] = useState<string | null>(null);
   const [notifications, setNotifications] = useState<ConsumerNotification[]>([]);
   const [notificationsPage, setNotificationsPage] = useState(1);
   const [notificationsHasMore, setNotificationsHasMore] = useState(false);
@@ -200,6 +201,19 @@ export default function ConsumerHomeScreen() {
     catch { Alert.alert(t('contact.error' as never)); }
   };
 
+  const toggleFarmerSubscription = async (item: ConsumerListing) => {
+    if (subscriptionBusyId) return;
+    setSubscriptionBusyId(item.farmerId);
+    try {
+      if (item.isFarmerFollowed) await unsubscribeFromFarmer(item.farmerId);
+      else await subscribeToFarmer(item.farmerId);
+      setItems((current) => current.map((listing) => listing.farmerId === item.farmerId ? { ...listing, isFarmerFollowed: !item.isFarmerFollowed } : listing));
+    } catch (error) {
+      if (error instanceof ConsumerAuthError && error.code === 'unauthorized') router.replace('/auth/consumer/login');
+      else Alert.alert(t('consumer.subscriptionError'));
+    } finally { setSubscriptionBusyId(null); }
+  };
+
   const loadMoreNotifications = async () => {
     if (loadingMoreNotifications || !notificationsHasMore) return;
     setLoadingMoreNotifications(true);
@@ -252,7 +266,8 @@ export default function ConsumerHomeScreen() {
         {items.map((item) => {
           const displayName = localizedProduceName(item.name, item.nameTranslations, language);
           const photoKey = `${item.id}:0`;
-          return <Pressable key={item.id} accessibilityRole="button" onPress={() => router.push({ pathname: '/consumer/produce/[produceId]', params: { produceId: item.id } })} style={styles.card}>
+          return <View key={item.id} style={styles.card}>
+            <Pressable accessibilityRole="button" onPress={() => router.push({ pathname: '/consumer/produce/[produceId]', params: { produceId: item.id } })}>
             {item.photoUrl && !failedPhotos.includes(photoKey) ? <Image source={{ uri: item.photoUrl, headers: photoHeaders }} contentFit="cover" onError={() => setFailedPhotos((current) => [...current, photoKey])} style={styles.photo} accessibilityLabel={`${t('consumer.photo')} ${displayName}`} /> : <View style={styles.photoPlaceholder}><Text style={styles.placeholderGlyph}>🥬</Text></View>}
             <View style={styles.cardInfo}>
               <Text style={styles.productName}>{displayName}</Text>
@@ -263,7 +278,9 @@ export default function ConsumerHomeScreen() {
               <Text style={styles.quantity}>{t('consumer.quantityAvailable').replace('{quantity}', String(item.quantity)).replace('{unit}', t(`produce.unit.${item.unit}` as never))}</Text>
               <Text style={styles.locality}>{t(item.distanceBand ? `consumer.distance.${item.distanceBand}` as never : 'consumer.locationNotShared')}</Text>
             </View>
-          </Pressable>;
+            </Pressable>
+            {item.farmerName ? <Pressable accessibilityRole="button" accessibilityState={{ selected: Boolean(item.isFarmerFollowed), disabled: subscriptionBusyId === item.farmerId }} disabled={subscriptionBusyId === item.farmerId} onPress={() => void toggleFarmerSubscription(item)} style={styles.subscriptionButton}><Text style={styles.secondaryText}>{subscriptionBusyId === item.farmerId ? t('consumer.subscriptionWorking') : t(item.isFarmerFollowed ? 'consumer.unsubscribeFarmer' : 'consumer.subscribeFarmer')}</Text></Pressable> : null}
+          </View>;
         })}
         {hasMore ? <Pressable accessibilityRole="button" disabled={loadingMore} onPress={() => void loadMore()} style={styles.secondary}><Text style={styles.secondaryText}>{t(loadingMore ? 'consumer.loading' : 'consumer.loadMore')}</Text></Pressable> : null}
       </View>}
@@ -288,6 +305,7 @@ export default function ConsumerHomeScreen() {
       {activityLoading ? <View style={styles.loading}><ActivityIndicator color={MarketColors.green} /><Text style={styles.help}>{t('consumer.loading')}</Text></View> : requestLoadError ? <View style={styles.errorPanel}><Text accessibilityRole="alert" style={styles.error}>{t('consumer.loadError')}</Text><Pressable accessibilityRole="button" onPress={() => void refreshBuyerActivity()} style={styles.secondary}><Text style={styles.secondaryText}>{t('consumer.retry')}</Text></Pressable></View> : notifications.length === 0 ? <EmptyState icon="🔔" title={t('consumer.notificationsEmpty')} message={t('consumer.notificationsEmptyDetail')} /> : <View style={styles.listings}>
         {notifications.map((item) => <View key={item.id} style={styles.activityCard}>
           <Text style={styles.productName}>{t(('consumer.notification.' + item.event) as never)}</Text>
+          {item.event === 'farmer_new_produce' ? <Text style={styles.quantity}>{item.produce?.farmerName} · {localizedProduceName(item.produce?.name ?? '', undefined, language)}</Text> : null}
           {item.request ? <><Text style={styles.quantity}>{localizedProduceName(item.request.listingName, item.request.listingNameTranslations, language)} · {t(('consumer.requestStatus.' + item.request.status) as never)}</Text><Pressable accessibilityRole="button" onPress={() => { router.setParams({ section: 'requests', requestId: item.request!.id }); setSection('requests'); void refreshBuyerActivity(); }} style={styles.detailsButton}><Text style={styles.detailsText}>{t('consumer.viewRequest')}</Text></Pressable></> : null}
           {item.request?.status === 'accepted' ? <Text style={styles.help}>{t(('consumer.callStatus.' + (item.request.callStatus ?? 'unavailable')) as never)}</Text> : null}
           {!item.readAt ? <Pressable accessibilityRole="button" onPress={() => void markRead(item.id)} style={styles.secondary}><Text style={styles.secondaryText}>{t('consumer.markRead')}</Text></Pressable> : null}
@@ -303,7 +321,7 @@ const styles = StyleSheet.create({
   welcomePanel: { backgroundColor: MarketColors.greenSoft, borderRadius: 20, padding: 18, marginBottom: 14 }, eyebrow: { color: MarketColors.green, fontSize: 10, fontWeight: '800', letterSpacing: 1.2 }, greeting: { color: MarketColors.text, fontSize: 23, lineHeight: 29, fontWeight: '800', marginTop: 7 }, intro: { color: MarketColors.muted, fontSize: 13, lineHeight: 19, marginTop: 4 },
   searchBox: { minHeight: 50, flexDirection: 'row', alignItems: 'center', backgroundColor: MarketColors.card, borderWidth: 1, borderColor: MarketColors.border, borderRadius: 14, paddingHorizontal: 13, marginBottom: 17 }, searchIcon: { color: MarketColors.green, fontSize: 24, lineHeight: 27, marginRight: 9 }, searchInput: { flex: 1, minHeight: 48, color: MarketColors.text, fontSize: 14 },
   sortSection: { gap: 8, marginBottom: 20 }, sortLabel: { color: MarketColors.text, fontWeight: '700', fontSize: 13 }, sortButtons: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' }, sortButton: { minHeight: 42, justifyContent: 'center', paddingHorizontal: 13, borderRadius: 12, borderWidth: 1, borderColor: MarketColors.border, backgroundColor: MarketColors.card }, sortSelected: { borderColor: MarketColors.green, backgroundColor: MarketColors.greenSoft }, sortText: { color: MarketColors.text, fontSize: 12, fontWeight: '700' }, sortTextSelected: { color: MarketColors.greenDark },
-  section: { marginBottom: 24 }, listings: { gap: 12 }, card: { gap: 10, padding: 12, borderRadius: 18, borderWidth: 1, borderColor: MarketColors.border, backgroundColor: MarketColors.card }, photo: { width: '100%', height: 156, borderRadius: 13, backgroundColor: MarketColors.background }, photoPlaceholder: { width: '100%', height: 156, borderRadius: 13, backgroundColor: MarketColors.greenSoft, alignItems: 'center', justifyContent: 'center' }, placeholderGlyph: { fontSize: 38 }, cardInfo: { gap: 6 }, productName: { color: MarketColors.text, fontSize: 18, fontWeight: '800' }, quantity: { color: MarketColors.muted, fontSize: 12 }, price: { color: MarketColors.greenDark, fontSize: 15, fontWeight: '800' }, locality: { color: MarketColors.muted, fontSize: 11 }, marketPrice: { color: MarketColors.blue, fontSize: 11, lineHeight: 15, fontWeight: '700' }, detailsButton: { minHeight: 40, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center' }, detailsText: { color: MarketColors.greenDark, fontSize: 12, fontWeight: '800' }, requestSuccess: { color: MarketColors.greenDark, backgroundColor: MarketColors.greenSoft, borderRadius: 10, padding: 10, fontSize: 12, lineHeight: 17, fontWeight: '700' },
+  section: { marginBottom: 24 }, listings: { gap: 12 }, card: { gap: 10, padding: 12, borderRadius: 18, borderWidth: 1, borderColor: MarketColors.border, backgroundColor: MarketColors.card }, subscriptionButton: { minHeight: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 10, borderWidth: 1, borderColor: MarketColors.green, backgroundColor: MarketColors.greenSoft }, photo: { width: '100%', height: 156, borderRadius: 13, backgroundColor: MarketColors.background }, photoPlaceholder: { width: '100%', height: 156, borderRadius: 13, backgroundColor: MarketColors.greenSoft, alignItems: 'center', justifyContent: 'center' }, placeholderGlyph: { fontSize: 38 }, cardInfo: { gap: 6 }, productName: { color: MarketColors.text, fontSize: 18, fontWeight: '800' }, quantity: { color: MarketColors.muted, fontSize: 12 }, price: { color: MarketColors.greenDark, fontSize: 15, fontWeight: '800' }, locality: { color: MarketColors.muted, fontSize: 11 }, marketPrice: { color: MarketColors.blue, fontSize: 11, lineHeight: 15, fontWeight: '700' }, detailsButton: { minHeight: 40, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center' }, detailsText: { color: MarketColors.greenDark, fontSize: 12, fontWeight: '800' }, requestSuccess: { color: MarketColors.greenDark, backgroundColor: MarketColors.greenSoft, borderRadius: 10, padding: 10, fontSize: 12, lineHeight: 17, fontWeight: '700' },
   loading: { alignItems: 'center', gap: 8, paddingVertical: 28 }, help: { color: MarketColors.muted, fontSize: 12, lineHeight: 17 }, pushNotice: { backgroundColor: MarketColors.blueSoft, borderRadius: 12, padding: 11, marginBottom: 14 }, errorPanel: { gap: 8, backgroundColor: '#FFF4D6', borderRadius: 13, padding: 12 }, error: { color: '#B42318', fontSize: 13, lineHeight: 18 }, secondary: { minHeight: 44, alignItems: 'center', justifyContent: 'center', alignSelf: 'flex-start', paddingHorizontal: 14, borderRadius: 12, borderWidth: 1, borderColor: MarketColors.green }, secondaryText: { color: MarketColors.greenDark, fontWeight: '800', fontSize: 13 }, centerState: { minHeight: 280, alignItems: 'center', justifyContent: 'center', gap: 12 },
   activityTabs: { flexDirection: 'row', gap: 6, marginBottom: 16 }, activityTab: { minHeight: 42, justifyContent: 'center', paddingHorizontal: 11, borderRadius: 12, borderWidth: 1, borderColor: MarketColors.border }, activityTabActive: { backgroundColor: MarketColors.greenSoft, borderColor: MarketColors.green }, activityTabText: { color: MarketColors.text, fontSize: 11, fontWeight: '700' }, activityTabTextActive: { color: MarketColors.greenDark }, activityCard: { gap: 7, padding: 14, borderRadius: 14, borderWidth: 1, borderColor: MarketColors.border, backgroundColor: MarketColors.card }, selectedRequest: { borderColor: MarketColors.green, borderWidth: 2 }, requestForm: { gap: 8, marginTop: 8 }, requestInput: { minHeight: 44, borderWidth: 1, borderColor: MarketColors.border, borderRadius: 10, paddingHorizontal: 10, color: MarketColors.text }, requestButton: { minHeight: 44, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center', backgroundColor: MarketColors.green, borderRadius: 10, paddingHorizontal: 12, marginTop: 5 }, requestButtonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 12 }, contactBox: { gap: 4, borderTopWidth: 1, borderColor: MarketColors.border, paddingTop: 9, marginTop: 5 },
 });

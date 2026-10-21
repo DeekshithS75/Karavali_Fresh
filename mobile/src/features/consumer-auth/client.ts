@@ -24,6 +24,8 @@ export class ConsumerAuthError extends Error {
 
 export type ConsumerListing = {
   id: string;
+  farmerId: string;
+  isFarmerFollowed?: boolean;
   name: string;
   sourceLanguage: 'en' | 'kn' | 'tcy';
   nameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>;
@@ -62,7 +64,7 @@ export type ConsumerProduceRequest = {
 };
 
 export type ConsumerNotification = {
-  id: string; event: string; readAt: string | null; createdAt: string; request: ConsumerProduceRequest | null;
+  id: string; event: string; readAt: string | null; createdAt: string; request: ConsumerProduceRequest | null; produce?: { name: string; farmerName: string } | null;
 };
 
 function apiUrl(path: string) {
@@ -215,6 +217,18 @@ export async function getConsumerListings(query: ConsumerListingQuery = {}, sign
   if (query.distanceKm !== undefined) params.set('distanceKm', String(query.distanceKm));
   const result = await request<{ items: ConsumerListing[]; page: number; hasMore: boolean }>(`/api/consumer/produce?${params.toString()}`, { headers: { Authorization: `Bearer ${tokens.accessToken}` }, signal });
   return { ...result, items: result.items.map((item) => ({ ...item, photoUrl: item.photoUrl ? apiUrl(item.photoUrl) : null })) };
+}
+
+export async function subscribeToFarmer(farmerId: string) {
+  const tokens = await storage.read();
+  if (!tokens) throw new ConsumerAuthError('unauthorized');
+  return request<{ subscribed: true }>(`/api/consumer/farmers/${encodeURIComponent(farmerId)}/subscription`, { method: 'POST', headers: { Authorization: `Bearer ${tokens.accessToken}` } });
+}
+
+export async function unsubscribeFromFarmer(farmerId: string) {
+  const tokens = await storage.read();
+  if (!tokens) throw new ConsumerAuthError('unauthorized');
+  return request<{ subscribed: false }>(`/api/consumer/farmers/${encodeURIComponent(farmerId)}/subscription`, { method: 'DELETE', headers: { Authorization: `Bearer ${tokens.accessToken}` } });
 }
 
 export async function getConsumerListingDetail(id: string) {

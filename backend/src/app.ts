@@ -7,7 +7,7 @@ import multer from 'multer';
 import { z } from 'zod';
 import { areSessionSecretsConfigured, config, isPhoneVerificationConfigured, isRegistrationEncryptionConfigured } from './config.js';
 import { decryptSecretValue, encryptSecretValue, hashAadhaar, hashPhone, hmac } from './crypto.js';
-import { ConsumerModel, FarmerModel, MarketPriceObservationModel, NotificationModel, OtpChallengeModel, PendingRegistrationModel, ProduceModel, ProduceRequestModel, PushTokenModel } from './models/index.js';
+import { ConsumerModel, FarmerModel, FarmerSubscriptionModel, MarketPriceObservationModel, NotificationModel, OtpChallengeModel, PendingRegistrationModel, ProduceModel, ProduceRequestModel, PushTokenModel } from './models/index.js';
 import { compareAadhaarDocument, isOcrConfigured, OCR_ENGINE_NAME, type RegistrationDetails } from './providers/ocr.js';
 import { NaCallerError, normalizeIndianPhone } from './providers/otp.js';
 import { ProviderNotConfiguredError } from './providers/errors.js';
@@ -607,6 +607,57 @@ function distanceBand(distanceMeters: number) {
   return 'nearby_region';
 }
 
+async function notifyFarmerSubscribers(farmerId: Types.ObjectId, produceId: Types.ObjectId, vegetableName: string) {
+  try {
+  const subscriptions = await FarmerSubscriptionModel.find({ farmerId }).select('consumerId').lean().exec() as unknown as Array<{ consumerId: Types.ObjectId }>;
+  if (!subscriptions.length) return;
+  const consumers = await ConsumerModel.find({ _id: { $in: subscriptions.map((item) => item.consumerId) } }).select('_id fullName preferredLanguage').lean().exec() as unknown as Array<{ _id: Types.ObjectId; fullName: string; preferredLanguage?: 'en' | 'kn' | 'tcy' }>;
+  const ops = consumers.map((consumer) => ({ updateOne: {
+    filter: { recipientRole: 'consumer', recipientId: consumer._id, produceId, event: 'farmer_new_produce' },
+    update: { $setOnInsert: { recipientRole: 'consumer', recipientId: consumer._id, produceId, event: 'farmer_new_produce' } }, upsert: true,
+  } }));
+  const result = await NotificationModel.bulkWrite(ops, { ordered: false });
+  const insertedIndexes = new Set(Object.keys(result.upsertedIds).map(Number));
+  const farmer = await FarmerModel.findById(farmerId).select('fullName').lean().exec() as unknown as { fullName?: string } | null;
+  await Promise.all(consumers.filter((_consumer, index) => insertedIndexes.has(index)).map(async (consumer) => {
+    const notice = await NotificationModel.findOne({ recipientRole: 'consumer', recipientId: consumer._id, produceId, event: 'farmer_new_produce' }).select('_id').lean().exec() as unknown as { _id: Types.ObjectId } | null;
+    if (!notice) return;
+    const copy = notificationCopy(consumer.preferredLanguage, 'farmer_new_produce', { buyerName: farmer?.fullName, vegetableName });
+    void sendAccountPush('consumer', consumer._id, { ...copy, url: '/consumer', notificationId: String(notice._id), produceId: String(produceId) });
+  }));
+  } catch {
+    process.stderr.write('Farmer follower notification creation failed.\n');
+  }
+}
+
+app.get('/api/consumer/farmer-subscriptions', async (request, response) => {
+  try {
+    const { consumer } = await findAuthenticatedConsumer(request.header('authorization'));
+    const records = await FarmerSubscriptionModel.find({ consumerId: consumer._id }).select('farmerId').lean().exec() as unknown as Array<{ farmerId: Types.ObjectId }>;
+    return response.json({ farmerIds: records.map((record) => String(record.farmerId)) });
+  } catch (error) { return sendError(response, error); }
+});
+
+app.post('/api/consumer/farmers/:farmerId/subscription', async (request, response) => {
+  try {
+    const { consumer } = await findAuthenticatedConsumer(request.header('authorization'));
+    if (!Types.ObjectId.isValid(request.params.farmerId)) throw new ApiError(404, 'farmer_not_found');
+    const farmer = await FarmerModel.findById(request.params.farmerId).select('_id').lean().exec() as unknown as { _id: Types.ObjectId } | null;
+    if (!farmer) throw new ApiError(404, 'farmer_not_found');
+    await FarmerSubscriptionModel.updateOne({ consumerId: consumer._id, farmerId: farmer._id }, { $setOnInsert: { consumerId: consumer._id, farmerId: farmer._id } }, { upsert: true }).exec();
+    return response.json({ subscribed: true });
+  } catch (error) { return sendError(response, error); }
+});
+
+app.delete('/api/consumer/farmers/:farmerId/subscription', async (request, response) => {
+  try {
+    const { consumer } = await findAuthenticatedConsumer(request.header('authorization'));
+    if (!Types.ObjectId.isValid(request.params.farmerId)) throw new ApiError(404, 'farmer_not_found');
+    await FarmerSubscriptionModel.deleteOne({ consumerId: consumer._id, farmerId: request.params.farmerId }).exec();
+    return response.json({ subscribed: false });
+  } catch (error) { return sendError(response, error); }
+});
+
 app.get('/api/consumer/produce', async (request, response) => {
   try {
     const { consumer } = await findAuthenticatedConsumer(request.header('authorization'));
@@ -643,6 +694,8 @@ app.get('/api/consumer/produce', async (request, response) => {
     const farmerIds = [...new Set(pageRecords.map((record) => String((record as { farmerId?: Types.ObjectId }).farmerId ?? ''))) ].filter(Boolean);
     const farmers = farmerIds.length ? await FarmerModel.find({ _id: { $in: farmerIds } }).select('_id fullName').lean().exec() as unknown as Array<{ _id: Types.ObjectId; fullName: string }> : [];
     const farmerNames = new Map(farmers.map((farmer) => [String(farmer._id), farmer.fullName]));
+    const followed = await FarmerSubscriptionModel.find({ consumerId: consumer._id, farmerId: { $in: farmerIds } }).select('farmerId').lean().exec() as unknown as Array<{ farmerId: Types.ObjectId }>;
+    const followedIds = new Set(followed.map((item) => String(item.farmerId)));
     const items = await Promise.all(pageRecords.map(async (record) => {
       const coords = record.locationPoint?.coordinates;
       const canEstimateDistance = input.latitude !== undefined && input.longitude !== undefined && input.accuracyMeters !== undefined && input.accuracyMeters <= 1_000 &&
@@ -653,7 +706,7 @@ app.get('/api/consumer/produce', async (request, response) => {
         marketComparison = await createMarketComparison({ name: record.name, nameTranslations: record.nameTranslations, unit: record.priceUnit, pricePerUnit: record.pricePerUnit });
       } catch { /* A missing or unavailable market source is represented explicitly to consumers. */ }
       return {
-        id: String(record._id), name: record.name, sourceLanguage: record.sourceLanguage ?? 'en',
+        id: String(record._id), farmerId: String(record.farmerId), isFarmerFollowed: followedIds.has(String(record.farmerId)), name: record.name, sourceLanguage: record.sourceLanguage ?? 'en',
         ...(record.nameTranslations ? { nameTranslations: record.nameTranslations } : {}),
         quantity: record.quantity, unit: record.unit, pricePerUnit: record.pricePerUnit, priceUnit: record.priceUnit,
         farmerName: farmerNames.get(String((record as { farmerId?: Types.ObjectId }).farmerId)) ?? null,
@@ -690,7 +743,7 @@ app.get('/api/consumer/produce/:produceId', async (request, response) => {
     try { marketComparison = await createMarketComparison({ name: record.name, nameTranslations: record.nameTranslations, unit: record.priceUnit as FarmerProduceForMarket['unit'], pricePerUnit: record.pricePerUnit }); }
     catch { /* The client displays an explicit unavailable state. */ }
     return response.json({ item: {
-      id: String(record._id), name: record.name, sourceLanguage: record.sourceLanguage ?? 'en',
+      id: String(record._id), farmerId: String(record.farmerId), name: record.name, sourceLanguage: record.sourceLanguage ?? 'en',
       ...(record.nameTranslations ? { nameTranslations: record.nameTranslations } : {}),
       quantity: record.quantity, unit: record.unit, pricePerUnit: record.pricePerUnit, priceUnit: record.priceUnit,
       farmerName: farmer?.fullName ?? null, marketComparison,
@@ -993,13 +1046,22 @@ app.post('/api/consumer/calls/:sessionId/end', async (request, response) => {
 async function notificationsFor(role: 'consumer' | 'farmer', recipientId: Types.ObjectId, page: number) {
   const pageSize = 50;
   const [records, unreadCount] = await Promise.all([
-    NotificationModel.find({ recipientRole: role, recipientId }).sort({ createdAt: -1 }).skip((page - 1) * pageSize).limit(pageSize + 1).lean().exec() as unknown as Promise<Array<{ _id: Types.ObjectId; requestId: Types.ObjectId; event: string; readAt?: Date | null; createdAt: Date }>>,
+    NotificationModel.find({ recipientRole: role, recipientId }).sort({ createdAt: -1 }).skip((page - 1) * pageSize).limit(pageSize + 1).lean().exec() as unknown as Promise<Array<{ _id: Types.ObjectId; requestId?: Types.ObjectId; produceId?: Types.ObjectId; event: string; readAt?: Date | null; createdAt: Date }>>,
     NotificationModel.countDocuments({ recipientRole: role, recipientId, readAt: null }),
   ]);
-  const requests = await ProduceRequestModel.find({ _id: { $in: records.map((item) => item.requestId) } }).lean().exec() as unknown as Array<{
+  const requestIds = records.flatMap((item) => item.requestId ? [item.requestId] : []);
+  const produceIds = records.flatMap((item) => item.produceId ? [item.produceId] : []);
+  const [requests, produces] = await Promise.all([
+    ProduceRequestModel.find({ _id: { $in: requestIds } }).lean().exec() as unknown as Promise<Array<{
     _id: Types.ObjectId; buyerId: Types.ObjectId; listingId: Types.ObjectId; farmerId: Types.ObjectId; listingName: string; listingNameTranslations?: Partial<Record<'en' | 'kn' | 'tcy', string>>; listingPricePerUnit: number; listingPriceUnit: string; requestedQuantity: number; unit: string; status: string; createdAt: Date; decidedAt?: Date | null;
-  }>;
+    }>>,
+    ProduceModel.find({ _id: { $in: produceIds } }).select('_id name farmerId').lean().exec() as unknown as Promise<Array<{ _id: Types.ObjectId; name: string; farmerId: Types.ObjectId }>>,
+  ]);
   const requestById = new Map(requests.map((item) => [String(item._id), item]));
+  const produceById = new Map(produces.map((item) => [String(item._id), item]));
+  const produceFarmerIds = [...new Set(produces.map((item) => String(item.farmerId)))];
+  const produceFarmers = produceFarmerIds.length ? await FarmerModel.find({ _id: { $in: produceFarmerIds } }).select('_id fullName').lean().exec() as unknown as Array<{ _id: Types.ObjectId; fullName: string }> : [];
+  const produceFarmerNames = new Map(produceFarmers.map((item) => [String(item._id), item.fullName]));
   const buyerIds = role === 'farmer' ? [...new Set(requests.map((item) => String(item.buyerId)))].filter((id) => id !== 'undefined') : [];
   const buyers = buyerIds.length ? await ConsumerModel.find({ _id: { $in: buyerIds } }).select('_id fullName').lean().exec() as unknown as Array<{ _id: Types.ObjectId; fullName: string }> : [];
   const buyerNames = new Map(buyers.map((buyer) => [String(buyer._id), buyer.fullName]));
@@ -1009,6 +1071,10 @@ async function notificationsFor(role: 'consumer' | 'farmer', recipientId: Types.
     return {
       id: String(item._id), event: item.event, readAt: item.readAt ?? null, createdAt: item.createdAt,
       request: requestData ? { ...requestData, ...(role === 'farmer' && produceRequest ? { buyerName: buyerNames.get(String(produceRequest.buyerId)) ?? 'Buyer' } : {}) } : null,
+      produce: item.produceId && produceById.has(String(item.produceId)) ? {
+        name: produceById.get(String(item.produceId))!.name,
+        farmerName: produceFarmerNames.get(String(produceById.get(String(item.produceId))!.farmerId)) ?? '',
+      } : null,
     };
   }));
   const hasMore = items.length > pageSize;
@@ -1161,6 +1227,7 @@ app.post('/api/farmer/produce', produceUpload.array('photos', 5), async (request
       ...(input.location?.status === 'captured' ? { locationPoint: { type: 'Point', coordinates: [input.location.longitude, input.location.latitude] } } : {}),
       status: input.pricePerUnit == null ? 'awaiting_price' : 'published',
     }]);
+    if (record.status === 'published') await notifyFarmerSubscribers(farmer._id, record._id, record.name);
     return response.status(201).json({ item: formatProduce({
       id: String(record._id), name: record.name, sourceLanguage: record.sourceLanguage,
       nameTranslations: record.nameTranslations, quantity: record.quantity, unit: record.unit,
@@ -1202,6 +1269,7 @@ app.patch('/api/farmer/produce/:produceId/price', async (request, response) => {
       photos: Array<{ storageKey?: string; publicId?: string; assetId?: string; resourceType?: 'image'; format?: string; width?: number; height?: number; mimeType: string; size: number }>; createdAt: Date; updatedAt: Date;
     } | null;
     if (!record) throw new ApiError(409, 'produce_price_already_set');
+    await notifyFarmerSubscribers(farmer._id, record._id, record.name);
     return response.json({ item: formatProduce({ ...record, id: String(record._id) }) });
   } catch (error) { return sendError(response, error); }
 });
@@ -1213,9 +1281,11 @@ app.patch('/api/farmer/produce/:produceId/publication', async (request, response
     if (!Types.ObjectId.isValid(request.params.produceId)) throw new ApiError(404, 'produce_not_found');
     const { published } = publishListingSchema.parse(request.body);
     let nextStatus = published ? 'published' : 'priced_unpublished';
+    let newlyPublished = false;
+    let publishedName = '';
     await session.withTransaction(async () => {
-      const current = await ProduceModel.findOne({ _id: request.params.produceId, farmerId: farmer._id }).select('status quantity pricePerUnit priceUnit').session(session).lean().exec() as {
-        status: string; quantity: number; pricePerUnit?: number | null; priceUnit?: string | null;
+      const current = await ProduceModel.findOne({ _id: request.params.produceId, farmerId: farmer._id }).select('status quantity pricePerUnit priceUnit name').session(session).lean().exec() as {
+        status: string; quantity: number; pricePerUnit?: number | null; priceUnit?: string | null; name: string;
       } | null;
       if (!current) throw new ApiError(404, 'produce_not_found');
       if (published && (current.quantity <= 0 || !current.pricePerUnit || current.pricePerUnit <= 0 || !current.priceUnit)) throw new ApiError(409, 'produce_not_ready_to_publish');
@@ -1227,8 +1297,11 @@ app.patch('/api/farmer/produce/:produceId/publication', async (request, response
         { $set: { status: nextStatus } }, { new: true, runValidators: true, session },
       ).select('status').lean().exec() as { status: string } | null;
       if (!updated) throw new ApiError(409, 'produce_not_ready_to_publish');
+      newlyPublished = published && current.status !== 'published';
+      publishedName = current.name;
       if (!published) await cancelPendingProduceRequests(new Types.ObjectId(request.params.produceId), farmer._id, session, 'listing_unavailable');
     });
+    if (newlyPublished) await notifyFarmerSubscribers(farmer._id, new Types.ObjectId(request.params.produceId), publishedName);
     return response.json({ status: nextStatus });
   } catch (error) { return sendError(response, error); }
   finally { await session.endSession(); }

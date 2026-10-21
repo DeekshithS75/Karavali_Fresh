@@ -152,11 +152,19 @@ produceRequestSchema.index({ buyerId: 1, farmerId: 1, commodityKey: 1 }, { uniqu
 const notificationSchema = new Schema({
   recipientRole: { type: String, enum: ['consumer', 'farmer'], required: true, index: true },
   recipientId: { type: Schema.Types.ObjectId, required: true, index: true },
-  requestId: { type: Schema.Types.ObjectId, ref: 'ProduceRequest', required: true, index: true },
-  event: { type: String, enum: ['request_created', 'request_decided', 'request_cancelled', 'call_queued', 'call_initiated', 'call_failed', 'call_completed'], required: true },
+  requestId: { type: Schema.Types.ObjectId, ref: 'ProduceRequest', index: true },
+  produceId: { type: Schema.Types.ObjectId, ref: 'FarmerProduce', index: true },
+  event: { type: String, enum: ['request_created', 'request_decided', 'request_cancelled', 'call_queued', 'call_initiated', 'call_failed', 'call_completed', 'farmer_new_produce'], required: true },
   readAt: { type: Date, default: null },
 }, { timestamps: true, strict: 'throw' });
 notificationSchema.index({ recipientRole: 1, recipientId: 1, createdAt: -1 });
+notificationSchema.index({ recipientRole: 1, recipientId: 1, produceId: 1, event: 1 }, { unique: true, partialFilterExpression: { event: 'farmer_new_produce' } });
+
+const farmerSubscriptionSchema = new Schema({
+  consumerId: { type: Schema.Types.ObjectId, ref: 'Consumer', required: true, index: true },
+  farmerId: { type: Schema.Types.ObjectId, ref: 'Farmer', required: true, index: true },
+}, { timestamps: true, strict: 'throw' });
+farmerSubscriptionSchema.index({ consumerId: 1, farmerId: 1 }, { unique: true });
 
 const pushTokenSchema = new Schema({
   recipientRole: { type: String, enum: ['consumer', 'farmer'], required: true, index: true },
@@ -225,6 +233,7 @@ export const RateLimitModel = mongoose.models.FarmerRateLimit ?? mongoose.model(
 export const ProduceModel = mongoose.models.FarmerProduce ?? mongoose.model('FarmerProduce', produceSchema);
 export const ProduceRequestModel = mongoose.models.ProduceRequest ?? mongoose.model('ProduceRequest', produceRequestSchema);
 export const NotificationModel = mongoose.models.Notification ?? mongoose.model('Notification', notificationSchema);
+export const FarmerSubscriptionModel = mongoose.models.FarmerSubscription ?? mongoose.model('FarmerSubscription', farmerSubscriptionSchema);
 export const PushTokenModel = mongoose.models.PushToken ?? mongoose.model('PushToken', pushTokenSchema);
 export const CallAttemptModel = mongoose.models.CallAttempt ?? mongoose.model('CallAttempt', callAttemptSchema);
 export const InAppCallModel = mongoose.models.InAppCall ?? mongoose.model('InAppCall', inAppCallSchema);

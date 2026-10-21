@@ -1,6 +1,6 @@
 import { router } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { Linking, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { BackHandler, Linking, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { LanguageSelector } from '@/components/language-selector';
 import { MarketColors, ScreenFrame } from '@/components/marketplace-ui';
 import { ConsumerAuthError, clearPendingConsumerVerification, completeConsumerPhoneVerification, getConsumerPhoneVerificationStatus, getConsumerSessionState, getPendingConsumerVerification, loginDevConsumer, savePendingConsumerVerification, startConsumerPhoneVerification, type ConsumerChallenge } from '@/features/consumer-auth/client';
@@ -23,6 +23,16 @@ export function ConsumerAuthScreen({ page }: { page: Page }) {
   const isRegister = page === 'register';
   const unsupportedPage = page === 'forgot-password' || page === 'otp';
 
+  const goBack = async () => {
+    if (challenge) {
+      setChallenge(null);
+      setVerified(false);
+      await clearPendingConsumerVerification().catch(() => undefined);
+    }
+    if (router.canGoBack()) router.back();
+    else router.replace(isRegister ? '/auth/consumer/login' : '/');
+  };
+
   useEffect(() => {
     if (page !== 'login' && page !== 'register') {
       setRestoringVerification(false);
@@ -41,6 +51,23 @@ export function ConsumerAuthScreen({ page }: { page: Page }) {
     });
     return () => { active = false; };
   }, [page]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android') return undefined;
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (challenge) {
+        setChallenge(null);
+        setVerified(false);
+        setErrorKey(null);
+        void clearPendingConsumerVerification().catch(() => undefined);
+        return true;
+      }
+      if (router.canGoBack()) router.back();
+      else router.replace(isRegister ? '/auth/consumer/login' : '/');
+      return true;
+    });
+    return () => subscription.remove();
+  }, [challenge, isRegister]);
 
   useEffect(() => {
     if (!challenge) return;
@@ -145,23 +172,20 @@ export function ConsumerAuthScreen({ page }: { page: Page }) {
 
   return <ScreenFrame>
     <View style={styles.topBar}>
-      <Pressable accessibilityRole="button" onPress={() => router.replace('/')} style={styles.back}><Text style={styles.backText}>‹ {t('navigation.welcome')}</Text></Pressable>
+      <Pressable accessibilityRole="button" onPress={() => void goBack()} style={styles.back}><Text style={styles.backText}>‹ {t('navigation.welcome')}</Text></Pressable>
       <LanguageSelector />
     </View>
     <View style={styles.brand}><View style={styles.mark}><Text style={styles.glyph}>❧</Text></View><View><Text style={styles.brandName}>{t('brand.name')}</Text><Text style={styles.brandRegion}>{t('consumer.role')}</Text></View></View>
     <View style={styles.card}>
       <Text style={styles.title}>{t(isRegister ? 'consumer.auth.registerTitle' : unsupportedPage ? 'consumer.auth.recoveryTitle' : 'consumer.auth.loginTitle')}</Text>
-      <Text style={styles.intro}>{t(isRegister ? 'consumer.auth.registerIntro' : unsupportedPage ? 'consumer.auth.recoveryUnavailable' : 'consumer.auth.loginIntro')}</Text>
-      {!unsupportedPage ? <Text style={styles.note}>{t('consumer.auth.providerNote')}</Text> : null}
       {!unsupportedPage ? <>
         {isRegister ? <View style={styles.field}><Text style={styles.label}>{t('consumer.auth.fullName')}</Text><TextInput accessibilityLabel={t('consumer.auth.fullName')} value={fullName} onChangeText={setFullName} autoCapitalize="words" style={styles.input} /></View> : null}
         {!challenge ? <><View style={styles.field}><Text style={styles.label}>{t('consumer.auth.phone')}</Text><TextInput accessibilityLabel={t('consumer.auth.phone')} value={phone} onChangeText={setPhone} keyboardType="phone-pad" autoComplete="tel" style={styles.input} /></View><Pressable accessibilityRole="checkbox" accessibilityState={{ checked: phoneConsent }} onPress={() => setPhoneConsent((value) => !value)} style={styles.note}><Text>{phoneConsent ? '☑' : '□'} {t('consumer.auth.providerNote')}</Text></Pressable></> : <View style={styles.note}><Text style={styles.intro}>{challenge.instruction}</Text><Text style={styles.title}>{challenge.callNumber}</Text><Pressable accessibilityRole="button" onPress={() => void Linking.openURL(`tel:${challenge.callNumber}`)} style={styles.link}><Text style={styles.linkText}>{t('consumer.auth.callToVerify')}</Text></Pressable><Text style={styles.note}>{t(verified ? 'consumer.auth.verified' : 'consumer.auth.waiting')}</Text></View>}
         {errorKey ? <Text accessibilityRole="alert" style={styles.error}>{t(errorKey as never)}</Text> : null}
         <Pressable accessibilityRole="button" disabled={busy || restoringVerification || Boolean(challenge && !verified)} onPress={() => void submit()} style={[styles.primary, (busy || restoringVerification) && styles.disabled]}><Text style={styles.primaryText}>{t(busy || restoringVerification ? 'consumer.auth.working' : challenge ? 'consumer.auth.completeVerification' : isRegister ? 'consumer.auth.createAccount' : 'consumer.auth.signIn')}</Text></Pressable>
-        <Pressable accessibilityRole="button" disabled={busy} onPress={() => router.replace(isRegister ? '/auth/consumer/login' : '/auth/consumer/register')} style={styles.link}><Text style={styles.linkText}>{t(isRegister ? 'consumer.auth.haveAccount' : 'consumer.auth.needAccount')}</Text></Pressable>
+        <Pressable accessibilityRole="button" disabled={busy} onPress={() => router.push((isRegister ? '/auth/consumer/login' : '/auth/consumer/register') as never)} style={styles.link}><Text style={styles.linkText}>{t(isRegister ? 'consumer.auth.haveAccount' : 'consumer.auth.needAccount')}</Text></Pressable>
         {!isRegister ? <View style={styles.testLogin}>
           <Text style={styles.label}>{t('consumer.auth.devLogin')}</Text>
-          <Text style={styles.note}>{t('consumer.auth.devLoginNote')}</Text>
           <Text style={styles.label}>{t('consumer.auth.devLoginSecret')}</Text>
           <TextInput accessibilityLabel={t('consumer.auth.devLoginSecret')} value={devLoginSecret} onChangeText={setDevLoginSecret} secureTextEntry autoCapitalize="none" autoCorrect={false} style={styles.input} />
           <Pressable accessibilityRole="button" disabled={busy || !phone} onPress={() => void submitDevLogin()} style={[styles.secondary, (busy || !phone) && styles.disabled]}><Text style={styles.linkText}>{t('consumer.auth.devLoginButton')}</Text></Pressable>

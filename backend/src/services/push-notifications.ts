@@ -3,7 +3,7 @@ import { PushTokenModel } from '../models/index.js';
 type PushRole = 'consumer' | 'farmer';
 
 export async function sendAccountPush(role: PushRole, accountId: unknown, input: {
-  title: string; body: string; url: string; notificationId: string; requestId: string; categoryId?: string; callSessionId?: string;
+  title: string; body: string; url: string; notificationId: string; requestId?: string; produceId?: string; categoryId?: string; callSessionId?: string;
 }) {
   try {
     const tokens = await PushTokenModel.find({ recipientRole: role, recipientId: accountId, disabledAt: null })
@@ -16,7 +16,7 @@ export async function sendAccountPush(role: PushRole, accountId: unknown, input:
         headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'Accept-Encoding': 'gzip, deflate' },
         body: JSON.stringify(batch.map(({ token }) => ({
           to: token, title: input.title, body: input.body, sound: 'default', priority: 'high', channelId: 'requests',
-          data: { url: input.url, notificationId: input.notificationId, requestId: input.requestId, ...(input.categoryId ? { categoryId: input.categoryId } : {}), ...(input.callSessionId ? { callSessionId: input.callSessionId, role } : {}) },
+          data: { url: input.url, notificationId: input.notificationId, ...(input.requestId ? { requestId: input.requestId } : {}), ...(input.produceId ? { produceId: input.produceId } : {}), ...(input.categoryId ? { categoryId: input.categoryId } : {}), ...(input.callSessionId ? { callSessionId: input.callSessionId, role } : {}) },
           ...(input.categoryId ? { categoryId: input.categoryId } : {}),
         }))),
         signal: AbortSignal.timeout(5_000),

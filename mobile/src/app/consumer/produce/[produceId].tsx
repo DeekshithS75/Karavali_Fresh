@@ -58,7 +58,7 @@ export default function ConsumerProduceDetailScreen() {
   };
 
   return <ScreenFrame>
-    <Pressable accessibilityRole="button" onPress={() => router.back()} style={styles.back}><Text style={styles.backText}>‹ {t('navigation.returnToWelcome')}</Text></Pressable>
+    <Pressable accessibilityRole="button" onPress={() => router.canGoBack() ? router.back() : router.replace('/consumer')} style={styles.back}><Text style={styles.backText}>‹ {t('navigation.returnToWelcome')}</Text></Pressable>
     {loading ? <View style={styles.center}><ActivityIndicator color={MarketColors.green} /></View> : error ? <View style={styles.panel}><Text accessibilityRole="alert" style={styles.error}>{t('consumer.loadError')}</Text><Pressable accessibilityRole="button" onPress={() => void load()} style={styles.button}><Text style={styles.buttonText}>{t('consumer.retry')}</Text></Pressable></View> : !item ? <EmptyState icon="🥬" title={t('consumer.emptyTitle')} message={t('consumer.emptyMessage')} /> : <View style={styles.panel}>
       {item.photoUrls.length ? <>
         <ScrollView horizontal pagingEnabled showsHorizontalScrollIndicator={false} onMomentumScrollEnd={(event) => setGalleryPage(Math.round(event.nativeEvent.contentOffset.x / Math.max(1, screenWidth - 64)))} style={{ width: '100%' }}>

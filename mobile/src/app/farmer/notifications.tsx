@@ -44,11 +44,15 @@ export default function FarmerNotificationsScreen() {
   };
 
   return <FarmerDashboardGuard><ScreenFrame>
-    <Pressable accessibilityRole="button" onPress={() => router.back()} style={styles.back}><Text style={styles.backText}>‹ {t('navigation.welcome')}</Text></Pressable>
+    <Pressable accessibilityRole="button" onPress={() => router.canGoBack() ? router.back() : router.replace('/farmer')} style={styles.back}><Text style={styles.backText}>‹ {t('navigation.welcome')}</Text></Pressable>
     <SectionHeading title={t('farmer.notifications.title')} detail={`${unread} ${t('farmer.notifications.unread')}`} />
     {loading && items.length === 0 ? <View style={styles.center}><ActivityIndicator color={MarketColors.green} /></View> : error ? <View style={styles.panel}><Text accessibilityRole="alert" style={styles.error}>{t('farmer.requests.loadError')}</Text><Pressable accessibilityRole="button" onPress={() => void load()} style={styles.button}><Text style={styles.buttonText}>{t('produce.retry')}</Text></Pressable></View> : items.length === 0 ? <Text style={styles.help}>{t('farmer.notifications.empty')}</Text> : <View style={styles.list}>
       {items.map((item) => <View key={item.id} style={[styles.card, item.id === notificationId && styles.selected, !item.readAt && styles.unread]}>
-        <Text style={styles.title}>{t(('farmer.notifications.event.' + item.event) as never)}{!item.readAt ? ' · ●' : ''}</Text>
+        <Text style={styles.title}>{item.event === 'request_created' && item.request
+          ? t('farmer.notifications.requestCreatedNamed')
+            .replace('{name}', item.request.buyerName ?? t('farmer.requests.buyer'))
+            .replace('{produce}', localizedProduceName(item.request.listingName, item.request.listingNameTranslations, language))
+          : t(('farmer.notifications.event.' + item.event) as never)}{!item.readAt ? ' · ●' : ''}</Text>
         {item.request ? <>
           <Text style={styles.name}>{item.request.buyerName ?? t('farmer.requests.buyer')}</Text>
           <Text style={styles.help}>{localizedProduceName(item.request.listingName, item.request.listingNameTranslations, language)} · {t('farmer.requests.quantity').replace('{quantity}', String(item.request.requestedQuantity)).replace('{unit}', t(('produce.unit.' + item.request.unit) as never))}</Text>

@@ -2,7 +2,7 @@ import { File } from 'expo-file-system';
 import * as ImagePicker from 'expo-image-picker';
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { AppState, Linking, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { AppState, BackHandler, Linking, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { LanguageSelector } from '@/components/language-selector';
 import { MarketColors, ScreenFrame } from '@/components/marketplace-ui';
@@ -384,7 +384,7 @@ export function FarmerAuthFlow({ page }: Props) {
     finally { setBusy(false); }
   };
 
-  const cancelPhoneVerificationFlow = async () => {
+  const cancelPhoneVerificationFlow = useCallback(async () => {
     const challenge = farmerAuthRuntime.getPhoneVerification();
     if (challenge) {
       setBusy(true);
@@ -396,7 +396,16 @@ export function FarmerAuthFlow({ page }: Props) {
     farmerAuthRuntime.clearPhoneVerification();
     await clearPendingFarmerPhoneVerification().catch(() => undefined);
     router.replace(farmerAuthRuntime.isRegistrationOtp() ? '/auth/farmer/verification' as never : '/auth/farmer/login' as never);
-  };
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android' || page !== 'otp') return undefined;
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      void cancelPhoneVerificationFlow();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [cancelPhoneVerificationFlow, page]);
 
   useFocusEffect(useCallback(() => {
     if (page !== 'otp') return undefined;
@@ -446,11 +455,10 @@ export function FarmerAuthFlow({ page }: Props) {
   );
 
   const header = <View style={styles.topBar}>
-    <Pressable accessibilityRole="button" accessibilityLabel={t('navigation.back')} onPress={() => page === 'otp' ? void cancelPhoneVerificationFlow() : router.replace(page === 'entry' ? '/' : '/auth/farmer')} style={styles.back}><Text style={styles.backText}>‹ {t('navigation.back')}</Text></Pressable>
+    <Pressable accessibilityRole="button" accessibilityLabel={t('navigation.back')} onPress={() => page === 'otp' ? void cancelPhoneVerificationFlow() : router.canGoBack() ? router.back() : router.replace(page === 'entry' ? '/' : '/auth/farmer')} style={styles.back}><Text style={styles.backText}>‹ {t('navigation.back')}</Text></Pressable>
     <LanguageSelector />
   </View>;
   const brand = <View style={styles.brand}><View style={styles.brandMark}><Text style={styles.brandGlyph}>❧</Text></View><View><Text style={styles.brandName}>{t('brand.name')}</Text><Text style={styles.brandRegion}>{t('brand.region')}</Text></View></View>;
-  const banner = <View style={styles.demoBanner}><Text style={styles.demoText}>{t(capabilities?.phoneVerificationEnabled ? 'farmerAuth.secureBanner' : 'farmerAuth.demoBanner')}</Text></View>;
   const visibleNotice = notice ?? (page === 'otp' && !farmerAuthRuntime.getPhoneVerification() ? 'farmerAuth.backendUnavailable' : null);
   const noticeDetails = noticeFields.length && (notice === 'farmerAuth.documentMismatch' || notice === 'farmerAuth.documentFieldsMissing')
     ? t(notice === 'farmerAuth.documentMismatch' ? 'farmerAuth.fieldsMismatch' : 'farmerAuth.fieldsUnreadable')
@@ -469,8 +477,6 @@ export function FarmerAuthFlow({ page }: Props) {
     {page === 'entry' ? <View style={styles.card}>
       <Text style={styles.eyebrow}>{t('auth.role.farmer')}</Text>
       <Text style={styles.title}>{t('farmerAuth.entryTitle')}</Text>
-      <Text style={styles.intro}>{t('farmerAuth.entryIntro')}</Text>
-      {banner}
       {loadingCapabilities || busy ? <Text style={styles.notice}>{t('farmerAuth.checkingSession')}</Text> : null}
       {!loadingCapabilities && !capabilityError && capabilities?.sessionSigningConfigured !== false && (entrySessionState === 'unavailable' || entrySessionState === 'configuration-error') ? <View style={styles.providerDisclosure}>
         <Text accessibilityRole="alert" style={styles.warningText}>{t(entrySessionState === 'configuration-error' ? 'farmerAuth.apiConfigurationMissing' : 'farmerAuth.sessionUnavailable')}</Text>
@@ -496,7 +502,6 @@ export function FarmerAuthFlow({ page }: Props) {
 
     {page === 'register' ? <View style={styles.card}>
       <Text style={styles.eyebrow}>{t('auth.role.farmer')}</Text><Text style={styles.title}>{t('farmerAuth.registerTitle')}</Text>
-      <Text style={styles.intro}>{t('farmerAuth.registerIntro')}</Text>{banner}
       {field('fullName', 'farmerAuth.fullName', 'farmerAuth.fullNamePlaceholder')}
       {field('age', 'farmerAuth.age', 'farmerAuth.agePlaceholder', { keyboard: 'number-pad', maxLength: 3 })}
       <Text style={styles.label}>{t('farmerAuth.gender')}</Text>
@@ -504,11 +509,7 @@ export function FarmerAuthFlow({ page }: Props) {
       {errors.gender ? <Text accessibilityRole="alert" style={styles.error}>{t(errors.gender)}</Text> : null}
       {field('phone', 'farmerAuth.phone', 'farmerAuth.phonePlaceholder', { keyboard: 'number-pad', maxLength: 10 })}
       {field('aadhaar', 'farmerAuth.aadhaar', 'farmerAuth.aadhaarPlaceholder', { keyboard: 'number-pad', secure: true, maxLength: 12 })}
-      <Text style={styles.help}>{t('farmerAuth.aadhaarPrivacy')}</Text>
       {field('address', 'farmerAuth.address', 'farmerAuth.addressPlaceholder')}
-      <Text style={styles.help}>{t('farmerAuth.linkedPhoneNotice')}</Text>
-      <Text style={styles.help}>{t('farmerAuth.ocrNotice')}</Text>
-      {privacyNotice && capabilities?.ocrEngineConfigured ? <View style={styles.providerDisclosure}><Text style={styles.label}>{capabilities.ocrEngineName}</Text><Text style={styles.help}>{privacyNotice}</Text></View> : null}
       <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: consented }} onPress={() => { if (consented) { update('aadhaar', ''); discardDocument(); } setConsented((value) => !value); setErrors((current) => ({ ...current, consent: undefined })); }} style={styles.consentRow}><View style={[styles.checkbox, consented && styles.checkboxChecked]}>{consented ? <Text style={styles.checkmark}>✓</Text> : null}</View><Text style={styles.consentText}>{t('farmerAuth.consent')}</Text></Pressable>
       {errors.consent ? <Text accessibilityRole="alert" style={styles.error}>{t(errors.consent)}</Text> : null}
       <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: phoneVerificationConsented }} onPress={() => { setPhoneVerificationConsented((value) => !value); setErrors((current) => ({ ...current, phoneVerificationConsent: undefined })); }} style={styles.consentRow}><View style={[styles.checkbox, phoneVerificationConsented && styles.checkboxChecked]}>{phoneVerificationConsented ? <Text style={styles.checkmark}>✓</Text> : null}</View><Text style={styles.consentText}>{t('farmerAuth.phoneVerificationConsent')}</Text></Pressable>
@@ -518,7 +519,6 @@ export function FarmerAuthFlow({ page }: Props) {
         <Pressable accessibilityRole="button" disabled={!consented || !canCollectIdentity || busy} onPress={() => chooseDocument('camera')} style={[styles.secondaryButton, (!consented || !canCollectIdentity) && styles.disabled]}><Text style={styles.linkText}>{t('farmerAuth.captureDocument')}</Text></Pressable>
         <Pressable accessibilityRole="button" disabled={!consented || !canCollectIdentity || busy} onPress={() => chooseDocument('library')} style={[styles.secondaryButton, (!consented || !canCollectIdentity) && styles.disabled]}><Text style={styles.linkText}>{t('farmerAuth.uploadDocument')}</Text></Pressable>
       </View>
-      <Text style={styles.help}>{documentUri ? t('farmerAuth.documentSelected') : t('farmerAuth.documentUnavailable')}</Text>
       {errors.document ? <Text accessibilityRole="alert" style={styles.error}>{t(errors.document)}</Text> : null}
       {!loadingCapabilities && !canCollectIdentity ? <Text style={styles.warning}>{t('farmerAuth.providerMissing')}</Text> : null}
       {noticeView}
@@ -527,7 +527,6 @@ export function FarmerAuthFlow({ page }: Props) {
 
     {page === 'login' ? <View style={styles.card}>
       <Text style={styles.eyebrow}>{t('auth.role.farmer')}</Text><Text style={styles.title}>{t('farmerAuth.loginTitle')}</Text>
-      <Text style={styles.intro}>{t('farmerAuth.loginIntro')}</Text>{banner}
       {field('phone', 'farmerAuth.phone', 'farmerAuth.phonePlaceholder', { keyboard: 'number-pad', maxLength: 10 })}
       <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: phoneVerificationConsented }} onPress={() => { setPhoneVerificationConsented((value) => !value); setErrors((current) => ({ ...current, phoneVerificationConsent: undefined })); }} style={styles.consentRow}><View style={[styles.checkbox, phoneVerificationConsented && styles.checkboxChecked]}>{phoneVerificationConsented ? <Text style={styles.checkmark}>✓</Text> : null}</View><Text style={styles.consentText}>{t('farmerAuth.phoneVerificationConsent')}</Text></Pressable>
       {errors.phoneVerificationConsent ? <Text accessibilityRole="alert" style={styles.error}>{t(errors.phoneVerificationConsent)}</Text> : null}
@@ -536,12 +535,10 @@ export function FarmerAuthFlow({ page }: Props) {
 
     {page === 'otp' ? <View style={styles.card}>
       <Text style={styles.eyebrow}>{t('auth.role.farmer')}</Text><Text style={styles.title}>{t('farmerAuth.phoneVerificationTitle')}</Text>
-      <Text style={styles.intro}>{t('farmerAuth.phoneVerificationIntro')}</Text>{banner}
       {farmerAuthRuntime.getPhoneVerification() ? <View style={styles.callPanel}>
         <Text style={styles.label}>{t('farmerAuth.callNumber')}</Text>
         <Text accessibilityRole="text" style={styles.callNumber}>{farmerAuthRuntime.getPhoneVerification()!.callNumber}</Text>
         <Text style={styles.help}>{farmerAuthRuntime.getPhoneVerification()!.instruction}</Text>
-        <Text style={styles.help}>{t('farmerAuth.callMayEndQuickly')}</Text>
         <Pressable accessibilityRole="button" disabled={busy} onPress={() => void openDialer()} style={[styles.secondaryButton, busy && styles.disabled]}><Text style={styles.linkText}>{t('farmerAuth.callNow')}</Text></Pressable>
         <Text accessibilityLiveRegion="polite" style={verificationStatus === 'expired' ? styles.warning : styles.notice}>{t(verificationStatus === 'expired' ? 'farmerAuth.phoneVerificationExpired' : verificationStatus === 'verified' ? 'farmerAuth.phoneVerificationFinishing' : verificationStatus === 'cancelled' ? 'farmerAuth.phoneVerificationCancelled' : 'farmerAuth.phoneVerificationWaiting')}</Text>
       </View> : null}
@@ -552,14 +549,13 @@ export function FarmerAuthFlow({ page }: Props) {
 
     {page === 'verification' ? <View style={styles.card}>
       <Text style={styles.eyebrow}>{t('auth.role.farmer')}</Text><Text style={styles.title}>{t('farmerAuth.verificationTitle')}</Text>
-      <Text style={styles.intro}>{t('farmerAuth.verificationIntro')}</Text>{banner}
       {noticeView ?? <Text style={styles.notice}>{t(farmerAuthRuntime.getVerificationState() === 'failed' ? 'farmerAuth.verificationFailed' : 'farmerAuth.verificationPending')}</Text>}
       {phoneVerificationConsentRequired ? <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: phoneVerificationConsented }} onPress={() => setPhoneVerificationConsented((value) => !value)} style={styles.consentRow}><View style={[styles.checkbox, phoneVerificationConsented && styles.checkboxChecked]}>{phoneVerificationConsented ? <Text style={styles.checkmark}>✓</Text> : null}</View><Text style={styles.consentText}>{t('farmerAuth.phoneVerificationConsent')}</Text></Pressable> : null}
       {phoneVerificationConsentRequired && phoneVerificationConsented ? button('farmerAuth.confirmPhoneVerificationConsent', giveRegistrationPhoneVerificationConsent) : null}
       {button('farmerAuth.checkStatus', checkVerification)}
     </View> : null}
 
-    <Pressable accessibilityRole="button" onPress={() => router.replace('/')} style={styles.returnLink}><Text style={styles.linkText}>{t('navigation.returnToWelcome')}</Text></Pressable>
+    <Pressable accessibilityRole="button" onPress={() => page === 'otp' ? void cancelPhoneVerificationFlow() : router.replace('/')} style={styles.returnLink}><Text style={styles.linkText}>{t('navigation.returnToWelcome')}</Text></Pressable>
   </ScreenFrame>;
 }
 

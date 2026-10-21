@@ -7,7 +7,7 @@ const KNOWN_KN: Record<string, string> = {
   cabbage: 'ಎಲೆಕೋಸು', cauliflower: 'ಹೂಕೋಸು', cucumber: 'ಸೌತೆಕಾಯಿ',
 };
 
-type NotificationEvent = 'request_created' | 'request_decided' | 'call_queued' | 'call_initiated' | 'call_failed' | 'call_completed';
+type NotificationEvent = 'request_created' | 'request_decided' | 'call_queued' | 'call_initiated' | 'call_failed' | 'call_completed' | 'farmer_new_produce';
 
 export function notificationCopy(language: Language | undefined, event: NotificationEvent, data: {
   buyerName?: string; vegetableName?: string; quantity?: number; unit?: string; decision?: 'accepted' | 'rejected'; failureCode?: string;
@@ -27,6 +27,9 @@ export function notificationCopy(language: Language | undefined, event: Notifica
       ? { title: 'ಹೊಸ ಉತ್ಪನ್ನ ವಿನಂತಿ', body: `${buyer} ${displayVegetable} ${quantity} ಕೇಳಿದ್ದಾರೆ. ಒಪ್ಪಿಕೊಳ್ಳಿ ಅಥವಾ ನಿರಾಕರಿಸಿ?` }
       : { title: 'New produce request', body: `${buyer} wants ${quantity} of ${displayVegetable}. Accept or decline?` };
   }
+  if (event === 'farmer_new_produce') return lang === 'kn'
+    ? { title: 'ನೀವು ಅನುಸರಿಸುವ ರೈತರ ಹೊಸ ಉತ್ಪನ್ನ', body: `${data.buyerName ?? 'ರೈತರು'} ಹೊಸದಾಗಿ ${data.vegetableName ?? 'ಉತ್ಪನ್ನ'} ಪ್ರಕಟಿಸಿದ್ದಾರೆ.` }
+    : { title: 'New produce from a farmer you follow', body: `${data.buyerName ?? 'A farmer'} published ${data.vegetableName ?? 'new produce'}.` };
   if (event === 'call_queued') return lang === 'kn'
     ? { title: 'ಕರೆ ವಿನಂತಿ ಕ್ಯೂನಲ್ಲಿ ಇದೆ', body: 'ಕರೆ ಸೇವೆ ವಿನಂತಿಯನ್ನು ಸ್ವೀಕರಿಸಿದೆ. ಕರೆ ಸ್ಥಿತಿಯನ್ನು ನವೀಕರಿಸುತ್ತೇವೆ.' }
     : { title: 'Call request queued', body: 'The call provider accepted the request. We will update you when it connects.' };
