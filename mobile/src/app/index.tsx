@@ -6,7 +6,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { LanguageSelector } from '@/components/language-selector';
 import { useLanguage } from '@/localization/LanguageProvider';
-import { getFarmerSessionState } from '@/features/farmer-auth/client';
+import { getFarmerSessionState, getPendingFarmerPhoneVerification } from '@/features/farmer-auth/client';
+import { farmerAuthRuntime } from '@/features/farmer-auth/runtime';
 import type { FarmerSessionState } from '@/features/farmer-auth/session-lifecycle';
 import { getConsumerSessionState, getPendingConsumerVerification } from '@/features/consumer-auth/client';
 
@@ -56,6 +57,15 @@ export default function WelcomeScreen() {
       setRestoringFarmer(false);
       if (state === 'valid') {
         router.replace('/farmer');
+        return;
+      }
+      const pendingFarmerVerification = await getPendingFarmerPhoneVerification().catch(() => null);
+      if (active && pendingFarmerVerification) {
+        farmerAuthRuntime.setPhone(pendingFarmerVerification.phone);
+        farmerAuthRuntime.setVerification(pendingFarmerVerification.verificationId ?? '', 'pending');
+        farmerAuthRuntime.setRegistrationOtp(pendingFarmerVerification.registration);
+        farmerAuthRuntime.setPhoneVerification(pendingFarmerVerification.challenge);
+        router.replace('/auth/farmer/otp');
         return;
       }
       const pendingVerification = await getPendingConsumerVerification().catch(() => null);

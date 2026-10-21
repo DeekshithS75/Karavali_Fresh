@@ -124,6 +124,12 @@ const sessionStorage = createFarmerSessionStorage(Platform.OS === 'web'
     setItem: (key: string, value: string) => SecureStore.setItemAsync(key, value),
     removeItem: (key: string) => SecureStore.deleteItemAsync(key),
   });
+const verificationStorage = Platform.OS === 'web' ? AsyncStorage : {
+  getItem: (key: string) => SecureStore.getItemAsync(key),
+  setItem: (key: string, value: string) => SecureStore.setItemAsync(key, value),
+  removeItem: (key: string) => SecureStore.deleteItemAsync(key),
+};
+const PENDING_PHONE_VERIFICATION_KEY = 'karavali-fresh.farmer.pending-phone-verification.v1';
 
 const readTokens = () => sessionStorage.read();
 
@@ -468,6 +474,40 @@ export async function getVerificationStatus(verificationId: string) {
 
 export type FarmerPhoneVerification = { challengeId: string; callNumber: string; instruction: string; expiresAt: string; status: 'pending' };
 export type FarmerPhoneVerificationStatus = { status: 'pending' | 'verified' | 'expired' | 'cancelled'; expiresAt: string };
+export type PendingFarmerPhoneVerification = {
+  challenge: FarmerPhoneVerification;
+  phone: string;
+  registration: boolean;
+  verificationId: string | null;
+};
+
+export async function savePendingFarmerPhoneVerification(value: PendingFarmerPhoneVerification) {
+  await verificationStorage.setItem(PENDING_PHONE_VERIFICATION_KEY, JSON.stringify(value));
+}
+
+export async function getPendingFarmerPhoneVerification(): Promise<PendingFarmerPhoneVerification | null> {
+  const serialized = await verificationStorage.getItem(PENDING_PHONE_VERIFICATION_KEY);
+  if (!serialized) return null;
+  try {
+    const value = JSON.parse(serialized) as Partial<PendingFarmerPhoneVerification>;
+    const challenge = value.challenge as Partial<FarmerPhoneVerification> | undefined;
+    if (typeof value.phone !== 'string' || typeof value.registration !== 'boolean'
+      || (value.verificationId !== null && typeof value.verificationId !== 'string') || !challenge
+      || typeof challenge.challengeId !== 'string' || typeof challenge.callNumber !== 'string'
+      || typeof challenge.instruction !== 'string' || typeof challenge.expiresAt !== 'string'
+      || challenge.status !== 'pending' || !Number.isFinite(Date.parse(challenge.expiresAt))) {
+      throw new Error('invalid_pending_verification');
+    }
+    return value as PendingFarmerPhoneVerification;
+  } catch {
+    await clearPendingFarmerPhoneVerification();
+    return null;
+  }
+}
+
+export async function clearPendingFarmerPhoneVerification() {
+  await verificationStorage.removeItem(PENDING_PHONE_VERIFICATION_KEY);
+}
 
 export async function consentForRegistrationPhoneVerification(verificationId: string) {
   return request<{ consented: true }>(`/api/farmer/registrations/${encodeURIComponent(verificationId)}/phone-verification-consent`, {

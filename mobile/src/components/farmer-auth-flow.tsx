@@ -11,16 +11,19 @@ import type { LanguageCode, TranslationKey } from '@/localization/types';
 import {
   FarmerAuthError,
   cancelFarmerPhoneVerification,
+  clearPendingFarmerPhoneVerification,
   completeFarmerPhoneVerification,
   consentForRegistrationPhoneVerification,
   getFarmerCapabilities,
   getFarmerSessionState,
   getFarmerPhoneVerificationStatus,
+  getPendingFarmerPhoneVerification,
   getVerificationStatus,
   lookupFarmerAccount,
   logoutFarmer,
   startFarmerPhoneVerification,
   startFarmerRegistrationPhoneVerification,
+  savePendingFarmerPhoneVerification,
   submitFarmerRegistration,
   type FarmerCapabilities,
   type FarmerDocumentField,
@@ -89,6 +92,19 @@ export function FarmerAuthFlow({ page }: Props) {
   const startingPhoneVerificationRef = useRef(false);
 
   useEffect(() => { documentUriRef.current = documentUri; }, [documentUri]);
+  useEffect(() => {
+    if (page !== 'otp') return;
+    let active = true;
+    void getPendingFarmerPhoneVerification().then((pending) => {
+      if (!active || !pending) return;
+      farmerAuthRuntime.setPhone(pending.phone);
+      farmerAuthRuntime.setVerification(pending.verificationId ?? '', 'pending');
+      farmerAuthRuntime.setRegistrationOtp(pending.registration);
+      farmerAuthRuntime.setPhoneVerification(pending.challenge);
+      setVerificationStatus(Date.parse(pending.challenge.expiresAt) <= Date.now() ? 'expired' : 'pending');
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [page]);
   useEffect(() => () => {
     const uri = documentUriRef.current;
     if (uri?.startsWith('file://')) {
@@ -252,6 +268,7 @@ export function FarmerAuthFlow({ page }: Props) {
       const result = await startFarmerPhoneVerification(phone);
       farmerAuthRuntime.setRegistrationOtp(false);
       farmerAuthRuntime.setPhoneVerification(result);
+      await savePendingFarmerPhoneVerification({ challenge: result, phone, registration: false, verificationId: null }).catch(() => undefined);
       setVerificationStatus('pending');
       router.push('/auth/farmer/otp' as never);
     } catch (error) {
@@ -303,6 +320,7 @@ export function FarmerAuthFlow({ page }: Props) {
         const challenge = await startFarmerRegistrationPhoneVerification(id);
         farmerAuthRuntime.setRegistrationOtp(true);
         farmerAuthRuntime.setPhoneVerification(challenge);
+        await savePendingFarmerPhoneVerification({ challenge, phone: farmerAuthRuntime.getPhone(), registration: true, verificationId: id }).catch(() => undefined);
         setVerificationStatus('pending');
         router.replace('/auth/farmer/otp' as never);
       } else if (status.documentComparison === 'pending' || status.status === 'pending') {
@@ -338,6 +356,7 @@ export function FarmerAuthFlow({ page }: Props) {
     setBusy(true);
     try {
       await completeFarmerPhoneVerification(challengeId);
+      await clearPendingFarmerPhoneVerification().catch(() => undefined);
       const sessionState = await getFarmerSessionState();
       if (sessionState === 'valid' || sessionState === 'unavailable' || sessionState === 'configuration-error') {
         farmerAuthRuntime.clearRegistrationOtp();
@@ -359,6 +378,7 @@ export function FarmerAuthFlow({ page }: Props) {
         ? await startFarmerRegistrationPhoneVerification(id)
         : await startFarmerPhoneVerification(farmerAuthRuntime.getPhone());
       farmerAuthRuntime.setPhoneVerification(challenge);
+      await savePendingFarmerPhoneVerification({ challenge, phone: farmerAuthRuntime.getPhone(), registration, verificationId: registration ? id : null }).catch(() => undefined);
       setVerificationStatus('pending');
     } catch (error) { setNotice(farmerAuthErrorText(error, page)); }
     finally { setBusy(false); }
@@ -374,6 +394,7 @@ export function FarmerAuthFlow({ page }: Props) {
     }
     setVerificationStatus('cancelled');
     farmerAuthRuntime.clearPhoneVerification();
+    await clearPendingFarmerPhoneVerification().catch(() => undefined);
     router.replace(farmerAuthRuntime.isRegistrationOtp() ? '/auth/farmer/verification' as never : '/auth/farmer/login' as never);
   };
 
