@@ -201,8 +201,6 @@ app.post('/api/consumer/auth/phone-verification', async (request, response) => {
     const phone = normalizeIndianPhone(input.phone);
     if (!phone) throw new ApiError(400, 'invalid_phone');
     const phoneHash = hashPhone(phone);
-    await enforceStrictRateLimit(`consumer-phone-ip:${hmac(request.ip ?? 'unknown')}`, 10, 15 * 60_000);
-    await enforceStrictRateLimit(`consumer-phone-number:${phoneHash}`, 3, 15 * 60_000);
     const consumer = await ConsumerModel.findOne({ phoneHash, accountStatus: 'active' }).select('_id').lean().exec() as { _id: Types.ObjectId } | null;
     if (input.purpose === 'registration' && consumer) throw new ApiError(409, 'consumer_phone_registered');
     const challenge = await startPhoneVerification(phone, input.purpose === 'login' ? 'consumer_login' : 'consumer_registration', consumer ? { consumerId: consumer._id } : {});

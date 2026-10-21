@@ -27,7 +27,6 @@ const schema = z.object({
   PRIVACY_NOTICE_KN: z.string().default('ರೈತರ ನೋಂದಣಿ ಮತ್ತು ದಾಖಲೆ ಹೋಲಿಕೆಗಾಗಿ ನಿಮ್ಮ ವಿವರಗಳನ್ನು ಸಂಸ್ಕರಿಸಲಾಗುತ್ತದೆ. OCR ಗುರುತಿನ ಪುರಾವೆಯಲ್ಲ; ನೀಡಿದ ಫೋನ್ ಸಂಖ್ಯೆಯ ಬಳಕೆಯನ್ನು ಮಿಸ್ಡ್ ಕಾಲ್ ಮೂಲಕ ಪ್ರತ್ಯೇಕವಾಗಿ ಪರಿಶೀಲಿಸಲಾಗುತ್ತದೆ.'),
   PRIVACY_NOTICE_TCY: z.string().optional(),
   PHONE_VERIFICATION_TTL_SECONDS: z.coerce.number().int().min(60).max(900).default(300),
-  PHONE_VERIFICATION_RESEND_SECONDS: z.coerce.number().int().min(30).max(3600).default(60),
   SESSION_TTL_SECONDS: z.coerce.number().int().min(300).max(60 * 60 * 24 * 90).default(60 * 60 * 24 * 30),
   REGISTRATION_TTL_HOURS: z.coerce.number().int().min(1).max(72).default(24),
 });
